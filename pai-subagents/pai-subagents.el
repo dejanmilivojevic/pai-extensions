@@ -563,6 +563,11 @@ foreground tool call (nil for background runs)."
            (let ((entry (pai-subagents--launch role task args ctx
                                                (if (eq (plist-get args :async) :false)
                                                    on-done nil))))
+             ;; Interrupting the parent stops a foreground child with it.
+             (when (and (eq (plist-get args :async) :false)
+                        (fboundp 'pai-agent-on-abort))
+               (pai-agent-on-abort (plist-get ctx :run)
+                                   (lambda () (pai-subagents--stop entry))))
              (unless (eq (plist-get args :async) :false)
                (funcall on-done
                         (list :content
