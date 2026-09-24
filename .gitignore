@@ -1,0 +1,13 @@
+*.elc
+/.pai/
+/tmp/
+*~
+\#*\#
+.\#*
+/test/tmp/
+# local, machine-specific dev files
+/my-providers.el
+/.mcp.json
+# scratch produced by demo/subagent runs
+/demo/hello-from-subagent.txt
+/demo/subagents/
