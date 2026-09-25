@@ -457,6 +457,13 @@ the same name, so enable one or the other, not both.")
    :set (lambda (v) (pai-isub-config-set :report-all-turns (if v t :false))))
   (pai-settings-ui-register-item
    'interactive-subagents 'defaults
+   :key :isub-idle-close :type 'number :label "Close idle after (s)"
+   :doc "Close a finished subagent when its buffer gets no input for this long (0 keeps it open)"
+   :get (lambda () (or (pai-isub-idle-close-seconds) 0))
+   :set (lambda (v) (pai-isub-config-set :idle-close-seconds
+                                         (if (numberp v) v (string-to-number (format "%s" v))))))
+  (pai-settings-ui-register-item
+   'interactive-subagents 'defaults
    :key :isub-allow-nested :type 'boolean :label "Allow nested subagents"
    :doc "Let subagent sessions keep the subagent tool themselves"
    :get (lambda () (pai-isub-nested-allowed-p))

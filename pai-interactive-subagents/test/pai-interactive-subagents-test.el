@@ -61,6 +61,10 @@
             pai--trusted t)
       (setq-local pai-isub--runs nil)
       (setq-local pai-isub--roles nil)
+      ;; like a real pai buffer, keep settings here: reading them must not
+      ;; lazily load the global file into the global default (a leak into
+      ;; later tests)
+      (setq-local pai-settings--global nil)
       (setq-local pai-settings--project
                   (list pai-isub-settings-key
                         (append '(:default-backend "mock") config))))
@@ -608,7 +612,7 @@
       (pai-isub-test--teardown buf))))
 
 (ert-deftest pai-isub-display-halves-parent-window ()
-  "Each child splits the parent's window in half, like `split-window-right'."
+  "The first child halves the parent's window; later ones share that half equally."
   (let ((parent (get-buffer-create " *isub-parent*"))
         (a (get-buffer-create " *isub-a*"))
         (b (get-buffer-create " *isub-b*"))
@@ -625,13 +629,170 @@
                    (wa1 (window-total-width wa))
                    (wb (pai-isub-display b parent)))
               (should (<= (abs (- w1 (/ w0 2))) 1))
-              ;; The second child only takes space from the parent.
-              (should (= (window-total-width wa) wa1))
-              (should (<= (abs (- (window-total-width wb)
-                                  (window-total-width pwin)))
-                          1))
-              (should (eq (window-in-direction 'right pwin) wb))))
+              (should (<= (abs (- wa1 w1)) 1))
+              ;; The second child takes its room from the first, not the
+              ;; parent, and both end up equally wide.
+              (should (= (window-total-width pwin) w1))
+              (should (<= (abs (- (window-total-width wb) (window-total-width wa))) 1))
+              (should (eq (window-in-direction 'right pwin) wa))
+              (should (eq (window-in-direction 'right wa) wb))))
         (mapc #'kill-buffer (list parent a b))))))
+
+;;;; Window layout
+
+(defun pai-isub-test--widths (parent)
+  "Return (PARENT-WIDTH . SUBAGENT-WIDTHS) of the selected frame, left to right."
+  (cons (window-total-width (get-buffer-window parent))
+        (mapcar #'window-total-width (pai-isub-sibling-windows parent))))
+
+(defun pai-isub-test--equal-p (widths)
+  "Return non-nil when WIDTHS differ by at most one column."
+  (<= (- (apply #'max widths) (apply #'min widths)) 1))
+
+(ert-deftest pai-isub-subagent-windows-share-width-equally ()
+  "Every new subagent joins the others; all are equally wide, the parent keeps half."
+  (let ((parent (get-buffer-create " *isub-layout-parent*"))
+        (subs (mapcar (lambda (i) (get-buffer-create (format " *isub-layout-%d*" i))) '(1 2 3)))
+        (frame-cols (frame-width)))
+    (save-window-excursion
+      (unwind-protect
+          (progn
+            (switch-to-buffer parent)
+            (delete-other-windows)
+            (let ((half (window-total-width)))
+              (dolist (b subs) (pai-isub-display b parent))
+              (let ((w (pai-isub-test--widths parent)))
+                (should (= (length (cdr w)) 3))
+                ;; the parent kept the half it gave the first subagent
+                (should (<= (abs (- (car w) (/ frame-cols 2))) 1))
+                (should (pai-isub-test--equal-p (cdr w))))
+              ;; closing one gives its room to the other subagents only
+              (pai-isub-retire-windows (nth 1 subs) parent)
+              (kill-buffer (nth 1 subs))
+              (accept-process-output nil 0.05)
+              (let ((w (pai-isub-test--widths parent)))
+                (should (= (length (cdr w)) 2))
+                (should (pai-isub-test--equal-p (cdr w)))
+                (should (<= (abs (- (car w) (/ frame-cols 2))) 1))
+                ;; no stray window was left showing the parent twice
+                (should (= 1 (length (get-buffer-window-list parent nil t)))))
+              (ignore half)))
+        (dolist (b (cons parent subs)) (when (buffer-live-p b) (kill-buffer b)))))))
+
+(ert-deftest pai-isub-retire-keeps-a-window-reused-for-something-else ()
+  (let ((parent (get-buffer-create " *isub-layout-parent*"))
+        (sub (get-buffer-create " *isub-layout-sub*"))
+        (other (get-buffer-create " *isub-layout-other*")))
+    (save-window-excursion
+      (unwind-protect
+          (progn
+            (switch-to-buffer parent)
+            (delete-other-windows)
+            (let ((win (pai-isub-display sub parent)))
+              (should (window-parameter win 'pai-isub-window))
+              ;; the user opens something else in that window
+              (set-window-buffer win other)
+              (pai-isub-retire-windows sub parent)
+              (kill-buffer sub)
+              (accept-process-output nil 0.05)
+              (should (window-live-p win))
+              (should (eq (window-buffer win) other))))
+        (dolist (b (list parent sub other)) (when (buffer-live-p b) (kill-buffer b)))))))
+
+;;;; Closing idle sessions
+
+(defun pai-isub-test--wait (seconds)
+  "Let timers run for SECONDS."
+  (let ((end (+ (float-time) seconds)))
+    (while (< (float-time) end) (accept-process-output nil 0.02))))
+
+(ert-deftest pai-isub-idle-close-setting ()
+  (let ((buf (pai-isub-test--setup)))
+    (unwind-protect
+        (with-current-buffer buf
+          (should (= (pai-isub-idle-close-seconds) 60))
+          (setq-local pai-settings--project
+                      (list pai-isub-settings-key '(:default-backend "mock" :idle-close-seconds 0)))
+          (should-not (pai-isub-idle-close-seconds))
+          (setq-local pai-settings--project
+                      (list pai-isub-settings-key '(:default-backend "mock" :idle-close-seconds 90)))
+          (should (= (pai-isub-idle-close-seconds) 90)))
+      (pai-isub-test--teardown buf))))
+
+(ert-deftest pai-isub-idle-timer-outliving-its-parent-does-nothing ()
+  "With the parent gone, an idle check neither closes nor reads settings elsewhere."
+  (let* ((dead (generate-new-buffer " *isub-dead-parent*"))
+         (entry (list :id "sub-x" :status "idle" :parent dead :backend "mock")))
+    (kill-buffer dead)
+    (should-not (pai-isub-idle-close-seconds dead))
+    (cl-letf (((symbol-function 'pai-settings-get)
+               (lambda (&rest _) (error "settings read without a parent")))
+              ((symbol-function 'pai-isub-close)
+               (lambda (&rest _) (error "closed without a parent"))))
+      (pai-isub--idle-check entry))
+    (should-not (plist-get entry :idle-timer))))
+
+(ert-deftest pai-isub-finished-subagent-closes-when-left-alone ()
+  (let ((buf (pai-isub-test--setup '(:idle-close-seconds 0.2))))
+    (unwind-protect
+        (pai-isub-test--with-quiet-parent
+          (pai-isub-test--execute (list :agent "scout" :task "t") buf)
+          (let ((entry (with-current-buffer buf (car pai-isub--runs))))
+            ;; still working: never closed
+            (funcall pai-isub-test--emit 'busy)
+            (pai-isub-test--wait 0.35)
+            (should (pai-isub-live-p entry))
+            ;; done and untouched: closed after the delay
+            (funcall pai-isub-test--emit 'turn-end :text "done")
+            (should (pai-isub-live-p entry))
+            (pai-isub-test--wait 0.4)
+            (should (equal (plist-get entry :status) "closed"))
+            (should (assq 'close pai-isub-test--events))))
+      (pai-isub-test--teardown buf))))
+
+(ert-deftest pai-isub-input-in-the-subagent-keeps-it-open ()
+  (let ((buf (pai-isub-test--setup '(:idle-close-seconds 0.3))))
+    (unwind-protect
+        (pai-isub-test--with-quiet-parent
+          (pai-isub-test--execute (list :agent "scout" :task "t") buf)
+          (let ((entry (with-current-buffer buf (car pai-isub--runs))))
+            (funcall pai-isub-test--emit 'turn-end :text "done")
+            (pai-isub-test--wait 0.2)
+            ;; a command in the subagent's buffer restarts the clock
+            (with-current-buffer pai-isub-test--buffer (run-hooks 'post-command-hook))
+            (pai-isub-test--wait 0.2)
+            (should (pai-isub-live-p entry))
+            ;; unsent text at its prompt keeps it open indefinitely
+            (cl-letf (((symbol-function 'pai-isub--pending-input-p) (lambda (_) t)))
+              (pai-isub-test--wait 0.5)
+              (should (pai-isub-live-p entry)))
+            ;; left alone again: it closes
+            (pai-isub-test--wait 0.5)
+            (should (equal (plist-get entry :status) "closed"))))
+      (pai-isub-test--teardown buf))))
+
+(ert-deftest pai-isub-idle-close-off-and-waiting-parent ()
+  "With 0 nothing closes; a subagent the parent still waits for never closes."
+  (let ((buf (pai-isub-test--setup '(:idle-close-seconds 0))))
+    (unwind-protect
+        (pai-isub-test--with-quiet-parent
+          (pai-isub-test--execute (list :agent "scout" :task "t") buf)
+          (let ((entry (with-current-buffer buf (car pai-isub--runs))))
+            (funcall pai-isub-test--emit 'turn-end :text "done")
+            (should-not (plist-get entry :idle-timer))
+            (pai-isub-test--wait 0.2)
+            (should (pai-isub-live-p entry))))
+      (pai-isub-test--teardown buf)))
+  (let ((buf (pai-isub-test--setup '(:idle-close-seconds 0.1))))
+    (unwind-protect
+        (pai-isub-test--with-quiet-parent
+          (pai-isub-test--execute (list :agent "scout" :task "t") buf)
+          (let ((entry (with-current-buffer buf (car pai-isub--runs))))
+            ;; the task turn is still awaited by the parent
+            (should (plist-get entry :awaiting))
+            (pai-isub-test--wait 0.3)
+            (should (pai-isub-live-p entry))))
+      (pai-isub-test--teardown buf))))
 
 (provide 'pai-interactive-subagents-test)
 ;;; pai-interactive-subagents-test.el ends here

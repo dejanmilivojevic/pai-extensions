@@ -81,6 +81,18 @@ mid-run); with `async: false` only that one tool call stays pending until the
 child finishes the turn. A session stays alive between turns, so the parent
 keeps delegating to the same child instead of starting over.
 
+**Windows.** The first subagent takes the right half of the parent's window;
+later ones join it there, and the subagents always share that half equally
+(re-balanced whenever one opens or closes, and the window of a closed one is
+removed).
+
+**Closing idle sessions.** A subagent that finished its turn and is not
+awaited by the parent closes on its own when its buffer gets no input for 60
+seconds (`/menu` → *Interactive subagents* → *Close idle after (s)*; 0 keeps
+them open). Any command in its buffer, its window being selected, or text
+typed at its prompt and not sent yet keeps it open; the parent's transcript
+notes the close.
+
 | `subagent` action | Effect |
 |-------------------|--------|
 | `launch` (default) | Open a session for a role and give it a task |

@@ -266,6 +266,101 @@ Return non-nil when a call was waiting.  IS-ERROR marks it as a failure."
                (t nil))))
           (pai-isub-ui-refresh parent))))))
 
+;;;; Closing idle sessions
+;;
+;; A subagent that finished and is waiting for nothing closes on its own when
+;; nobody uses its buffer for `:idle-close-seconds' (default 60; 0 keeps it
+;; open).  Any command in its buffer, its window being selected, or text
+;; typed at its prompt and not sent yet keeps it open.
+
+(defconst pai-isub-idle-close-default 60
+  "Default seconds an idle, finished subagent stays open without input.")
+
+(defun pai-isub-idle-close-seconds (&optional parent)
+  "Return the idle-close delay in seconds, or nil when idle subagents stay open.
+Settings are per pai buffer, so they are read in PARENT (the subagent's
+parent chat buffer) when given -- timers and child events run elsewhere."
+  (cond
+   ;; the parent is gone (a timer outliving it): nothing to close for, and
+   ;; settings must not be read in whatever buffer happens to be current
+   ((and parent (not (buffer-live-p parent))) nil)
+   ((and parent (not (eq parent (current-buffer))))
+    (with-current-buffer parent (pai-isub-idle-close-seconds)))
+   (t (pai-isub--idle-close-seconds-here))))
+
+(defun pai-isub--idle-close-seconds-here ()
+  "Return the idle-close delay configured for the current buffer, or nil."
+  (let* ((v (plist-get (pai-isub-config) :idle-close-seconds))
+         (secs (cond ((numberp v) v)
+                     ((and (stringp v) (string-match-p "\\`[0-9.]+\\'" v)) (string-to-number v))
+                     (t pai-isub-idle-close-default))))
+    (and (> secs 0) secs)))
+
+(defun pai-isub--cancel-idle (entry)
+  "Cancel ENTRY's idle-close timer, if any."
+  (let ((timer (plist-get entry :idle-timer)))
+    (when (timerp timer) (cancel-timer timer))
+    (plist-put entry :idle-timer nil)))
+
+(defun pai-isub--pending-input-p (buffer)
+  "Return non-nil when BUFFER holds typed text not sent yet (pai sessions)."
+  (and (buffer-live-p buffer)
+       (fboundp 'pai--input-text)
+       (local-variable-p 'pai--input-marker buffer)
+       (with-current-buffer buffer
+         (let ((text (ignore-errors (pai--input-text))))
+           (and text (not (string-empty-p text)))))))
+
+(defun pai-isub--idle-p (entry)
+  "Return non-nil when ENTRY's child finished and nothing waits for it."
+  (and (equal (plist-get entry :status) "idle")
+       (not (plist-get entry :awaiting))
+       (not (plist-get entry :on-done))
+       (pai-isub-live-p entry)))
+
+(defun pai-isub--arm-idle (entry &optional delay)
+  "Check ENTRY for idleness after DELAY seconds (default the idle-close delay)."
+  (pai-isub--cancel-idle entry)
+  (let ((secs (pai-isub-idle-close-seconds (plist-get entry :parent))))
+    (when secs
+      (plist-put entry :idle-timer
+                 (run-at-time (or delay secs) nil #'pai-isub--idle-check entry)))))
+
+(defun pai-isub--idle-check (entry)
+  "Close ENTRY's child when it has been idle and unused long enough."
+  (plist-put entry :idle-timer nil)
+  (let ((secs (pai-isub-idle-close-seconds (plist-get entry :parent)))
+        (buffer (pai-isub-entry-buffer entry)))
+    (when (and secs (pai-isub--idle-p entry))
+      (let* ((now (float-time))
+             (quiet-since (max (or (plist-get entry :done-at) 0)
+                               (or (plist-get entry :last-input) 0)))
+             (left (- secs (- now quiet-since))))
+        (cond
+         ;; in use: its window is selected, or a message is being written
+         ((or (and (buffer-live-p buffer) (eq (window-buffer (selected-window)) buffer))
+              (pai-isub--pending-input-p buffer))
+          (pai-isub--arm-idle entry))
+         ;; used since the timer was armed: wait out the rest
+         ((> left 0.05) (pai-isub--arm-idle entry left))
+         (t
+          (let ((parent (plist-get entry :parent)))
+            (pai-isub-close entry)
+            (when (and (buffer-live-p parent) (fboundp 'pai--render-note))
+              (with-current-buffer parent
+                (pai--render-note
+                 (format "[subagent %s (%s) closed after %ds without input]"
+                         (plist-get entry :id) (plist-get entry :role) (round secs))))))))))))
+
+(defun pai-isub--track-input (entry)
+  "Note every command in ENTRY's child buffer as activity (restarts the idle clock)."
+  (let ((buffer (pai-isub-entry-buffer entry)))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (add-hook 'post-command-hook
+                  (lambda () (plist-put entry :last-input (float-time)))
+                  nil t)))))
+
 ;;;; Child events
 
 (defun pai-isub--clear-timer (entry)
@@ -289,6 +384,7 @@ This is the single funnel every backend reports through."
       ('ready
        (plist-put entry :status "idle"))
       ('busy
+       (pai-isub--cancel-idle entry)
        (plist-put entry :status "running"))
       ('status
        (plist-put entry :last-output text))
@@ -316,12 +412,19 @@ This is the single funnel every backend reports through."
          (plist-put entry :ended (float-time))))
       ('exit
        (pai-isub--clear-timer entry)
+       (pai-isub--cancel-idle entry)
+       ;; its buffer is going away: close the window it leaves behind
+       (pai-isub-retire-windows (pai-isub-entry-buffer entry) parent)
        (plist-put entry :status "closed")
        (plist-put entry :ended (float-time))
        (when (or (plist-get entry :awaiting) (plist-get entry :on-done))
          (plist-put entry :awaiting nil)
          (pai-isub--deliver entry 'exit
                             (or text "the subagent session was closed")))))
+    ;; a finished turn (or a failed one) starts the idle clock
+    (when (and (memq type '(ready turn-end error)) (pai-isub--idle-p entry))
+      (plist-put entry :done-at (float-time))
+      (pai-isub--arm-idle entry))
     (when (buffer-live-p parent)
       (with-current-buffer parent
         (pai-isub--record entry)
@@ -378,7 +481,8 @@ continuation of a foreground (async false) call, or nil."
                          :parent parent :on-done on-done :awaiting t
                          :started (float-time) :ended nil :last-output nil
                          :max-lines (plist-get args :max-lines)
-                         :timer nil :turns 0)))
+                         :timer nil :turns 0
+                         :done-at nil :last-input nil :idle-timer nil)))
         (pai-isub--record entry)
         (plist-put
          entry :handle
@@ -394,6 +498,7 @@ continuation of a foreground (async false) call, or nil."
                 :emit (lambda (type &rest props)
                         (pai-isub-on-child-event entry type props)))))
         (pai-isub--record entry)
+        (pai-isub--track-input entry)
         (pai-isub--arm-timeout entry (plist-get args :timeout))
         (pai-isub-backend-send backend (plist-get entry :handle)
                                (pai-isub--task-message entry task))
@@ -420,6 +525,7 @@ call pending until the child finishes the resulting turn."
     (when (and on-done (plist-get entry :on-done))
       (error "Subagent %s already has a foreground call pending" (plist-get entry :id)))
     (pai-isub--clear-timer entry)
+    (pai-isub--cancel-idle entry)
     (plist-put entry :awaiting t)
     (when on-done (plist-put entry :on-done on-done))
     (when (plist-member args :max-lines)
@@ -450,8 +556,11 @@ call pending until the child finishes the resulting turn."
   (when entry
     (let ((backend (pai-isub-entry-backend entry)))
       (pai-isub--clear-timer entry)
+      (pai-isub--cancel-idle entry)
       (plist-put entry :awaiting nil)
       (pai-isub--complete-pending entry "The subagent session was closed." nil)
+      ;; close the window it leaves behind, and rebalance the others
+      (pai-isub-retire-windows (pai-isub-entry-buffer entry) (plist-get entry :parent))
       (when backend
         (ignore-errors (pai-isub-backend-close backend (plist-get entry :handle))))
       (plist-put entry :status "closed")
