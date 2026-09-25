@@ -113,6 +113,20 @@
               (should (equal (plist-get (car pai-subagents--runs) :status) "completed")))))
       (pai-subagents-test--teardown buf))))
 
+(ert-deftest pai-subagents-children-never-get-memory-tools ()
+  "Tools marked `:subagent-exclude' (the user's memory) are kept from children."
+  (let ((buf (pai-subagents-test--setup)))
+    (unwind-protect
+        (with-current-buffer buf
+          (pai-register-tool (list :name "x-memory" :description "d" :subagent-exclude t
+                                   :parameters (pai-object-schema nil) :execute #'ignore))
+          (let ((names (mapcar (lambda (tool) (plist-get tool :name))
+                               (pai-subagents--child-tools "worker"))))
+            (should-not (member "x-memory" names))
+            (should (member "bash" names)))
+          (pai-unregister-tool "x-memory"))
+      (pai-subagents-test--teardown buf))))
+
 (ert-deftest pai-subagents-recursion-guard-and-stop ()
   "Children never see the subagent tool; stop terminates a run."
   (let ((buf (pai-subagents-test--setup)))

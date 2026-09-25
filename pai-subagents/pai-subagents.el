@@ -217,12 +217,14 @@ then settings :default-model, then PARENT-MODEL.  Return
 
 (defun pai-subagents--child-tools (role)
   "Return the tool plists a child of ROLE may use.
-Everything except `subagent' (recursion guard), restricted to the role's
-or its override's :tools allowlist when one is set."
+Everything except `subagent' (recursion guard) and tools kept from
+subagents (`pai-tool-subagent-allowed-p': the user's memory), restricted to
+the role's or its override's :tools allowlist when one is set."
   (let* ((allow (or (plist-get (pai-subagents--override-for role) :tools)
                     (plist-get (pai-subagents-role role) :tools))))
     (seq-filter (lambda (tool)
                   (and (not (equal (plist-get tool :name) "subagent"))
+                       (pai-tool-subagent-allowed-p tool)
                        (or (null allow)
                            (member (plist-get tool :name) allow))))
                 (pai-tools-all))))

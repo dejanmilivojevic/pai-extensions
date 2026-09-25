@@ -576,6 +576,7 @@ again since, and undo refuses rather than lose the later change."
         :label "Memory"
         :description "Save to long-term memory, which later sessions see in their system prompt. Use ONLY when the user asks you to remember or forget something, or states a lasting preference. Targets: user (who the user is, how they like to work), memory (environment and tooling facts), project (facts and conventions of this project). Actions: add a new entry; replace or remove the entry that contains `old` (a unique quote from it). Keep entries short and factual; never store secrets."
         :prompt-snippet "memory: save long-term memory the user asked for"
+        :subagent-exclude t
         :deferred :false
         :parameters (pai-object-schema
                      (list :action (pai-string-schema "add, replace or remove" :enum ["add" "replace" "remove"])

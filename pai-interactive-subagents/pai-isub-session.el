@@ -226,8 +226,12 @@ when its own instance did not load the extension from disk."
    (format "*pai sub: %s [%s]*" (plist-get spec :role) (plist-get spec :id))))
 
 (defun pai-isub-session--restrict-tools (spec)
-  "Drop tools this child may not use, per SPEC, in the current buffer."
+  "Drop tools this child may not use, per SPEC, in the current buffer.
+Tools marked `:subagent-exclude' (the user's memory) are always dropped."
   (unless (pai-isub-nested-allowed-p) (pai-unregister-tool "subagent"))
+  (dolist (tool (pai-tools-all))
+    (unless (pai-tool-subagent-allowed-p tool)
+      (pai-unregister-tool (plist-get tool :name))))
   (let ((allow (plist-get spec :tools)))
     (when allow
       (dolist (tool (pai-tools-all))
@@ -253,6 +257,10 @@ when its own instance did not load the extension from disk."
                        (buffer-local-value 'pai--trusted parent)))
          (buffer (generate-new-buffer (pai-isub-session--buffer-name spec))))
     (with-current-buffer buffer
+      ;; Mark the session as a subagent's before setup, so what runs during
+      ;; setup (the system prompt, `session-start' handlers) already sees it:
+      ;; memory neither feeds nor learns from subagent sessions.
+      (setq pai-subagent-session parent)
       ;; Inherit the parent's trust decision instead of prompting mid-tool-call.
       (cl-letf (((symbol-function 'pai--project-trusted-p) (lambda () trusted)))
         (pai--setup cwd))

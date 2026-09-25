@@ -166,9 +166,10 @@ Memory never just disappears: stopped (`/memory stop') and switched off
          " "))))))
 
 (defun pai-memory-refresh-widget ()
-  "Redraw the memory widget in the current pai buffer."
+  "Redraw the memory widget in the current pai buffer (none in subagent sessions)."
   (when (fboundp 'pai--set-widget)
-    (pai--set-widget "memory" (ignore-errors (pai-memory-widget-text)))))
+    (pai--set-widget "memory" (unless (pai-memory-subagent-buffer-p)
+                                (ignore-errors (pai-memory-widget-text))))))
 
 (add-hook 'pai-memory-change-hook #'pai-memory-refresh-widget)
 
@@ -950,22 +951,52 @@ A blank number restores the built-in default."
    :get (lambda () (or (pai-memory-get :long-term :provider) "none"))
    :set (lambda (v) (pai-memory-set :long-term :provider (if (equal v "none") nil v)))))
 
+;;;; Subagent sessions
+;;
+;; A subagent's chat buffer (`pai-subagent-session') is left alone: no memory
+;; snapshot or recall in its prompts, no observers, consolidation, promotion
+;; or skill statistics, no widget, no memory tools (`:subagent-exclude').  Its
+;; session file is marked private once, so catch-up, promotion and the search
+;; index -- which scan the project's session files from other buffers -- skip
+;; it too.
+
+(defun pai-memory-subagent-buffer-p (&optional buffer)
+  "Return non-nil when BUFFER (default current) is a subagent's session."
+  (and (fboundp 'pai-subagent-session-p) (pai-subagent-session-p buffer)))
+
+(defun pai-memory--user-sessions-only (handler)
+  "Return HANDLER wrapped to do nothing (return nil) in subagent sessions."
+  (lambda (event ctx)
+    (unless (pai-memory-subagent-buffer-p (plist-get ctx :buffer))
+      (funcall handler event ctx))))
+
+(defun pai-memory--on-subagent-start (_event ctx)
+  "Mark a subagent's session private, so nothing learns from its file."
+  (let ((buf (plist-get ctx :buffer))
+        (session (plist-get ctx :session)))
+    (when (and session (pai-memory-subagent-buffer-p buf)
+               (not (pai-memory-private-p session)))
+      (condition-case err (pai-memory-set-private session t)
+        (error (message "pai-memory: could not mark subagent session private: %s"
+                        (error-message-string err)))))))
+
 ;;;; Extension entry point
 
 (pai-memory-worker-register-model-roles)
 
 (defun pai-memory-extension (api)
   "Register pai-memory's handlers and commands on extension API."
-  (pai-ext-on api 'agent-settled #'pai-memory--on-settled)
-  (pai-ext-on api 'session-start #'pai-memory--on-session-start)
-  (pai-ext-on api 'session-compact #'pai-memory--on-refresh)
-  (pai-ext-on api 'turn-end #'pai-memory--on-turn-end) ; workers + gauges mid-run
-  (pai-ext-on api 'session-tree #'pai-memory--on-refresh)
-  (pai-ext-on api 'reload #'pai-memory--on-refresh)
-  (pai-ext-on api 'compact #'pai-memory-compact-handler)
-  (pai-ext-on api 'system-prompt-sections #'pai-memory--system-sections)
-  (pai-ext-on api 'session-shutdown #'pai-memory--on-session-end)
-  (pai-ext-on api 'session-before-switch #'pai-memory--on-session-end)
+  (pai-ext-on api 'agent-settled (pai-memory--user-sessions-only #'pai-memory--on-settled))
+  (pai-ext-on api 'session-start (pai-memory--user-sessions-only #'pai-memory--on-session-start))
+  (pai-ext-on api 'session-start #'pai-memory--on-subagent-start)
+  (pai-ext-on api 'session-compact (pai-memory--user-sessions-only #'pai-memory--on-refresh))
+  (pai-ext-on api 'turn-end (pai-memory--user-sessions-only #'pai-memory--on-turn-end)) ; workers + gauges mid-run
+  (pai-ext-on api 'session-tree (pai-memory--user-sessions-only #'pai-memory--on-refresh))
+  (pai-ext-on api 'reload (pai-memory--user-sessions-only #'pai-memory--on-refresh))
+  (pai-ext-on api 'compact (pai-memory--user-sessions-only #'pai-memory-compact-handler))
+  (pai-ext-on api 'system-prompt-sections (pai-memory--user-sessions-only #'pai-memory--system-sections))
+  (pai-ext-on api 'session-shutdown (pai-memory--user-sessions-only #'pai-memory--on-session-end))
+  (pai-ext-on api 'session-before-switch (pai-memory--user-sessions-only #'pai-memory--on-session-end))
   (pai-ext-register-command
    api "skills-export" :description "Export skills: /skills-export NAME...|--learned|--all DEST[.tar.gz]"
    :handler (pai-memory--in-pai-buffer
@@ -991,9 +1022,9 @@ A blank number restores the built-in default."
   (pai-ext-register-command
    api "memory-review" :description "Review pending memory and skill proposals"
    :handler (lambda (_args _ctx) (pai-memory-review) nil))
-  (pai-ext-on api 'tool-execution-start #'pai-memory--on-tool-start)
-  (pai-ext-on api 'agent-start #'pai-memory--on-agent-start)
-  (pai-ext-on api 'input #'pai-memory--on-input)
+  (pai-ext-on api 'tool-execution-start (pai-memory--user-sessions-only #'pai-memory--on-tool-start))
+  (pai-ext-on api 'agent-start (pai-memory--user-sessions-only #'pai-memory--on-agent-start))
+  (pai-ext-on api 'input (pai-memory--user-sessions-only #'pai-memory--on-input))
   (pai-ext-register-command
    api "memory-pin" :description "Pin a skill (never archived) or a memory entry (always in the snapshot): /memory-pin NAME|QUOTE"
    :arg-completions #'pai-memory--skill-names
@@ -1011,7 +1042,7 @@ A blank number restores the built-in default."
    :handler #'pai-memory-learn-command)
   (pai-ext-register-tool api pai-memory-tool-def)
   (pai-ext-register-tool api pai-memory-search-tool-def)
-  (pai-ext-on api 'context #'pai-memory-recall-context-handler)
+  (pai-ext-on api 'context (pai-memory--user-sessions-only #'pai-memory-recall-context-handler))
   (pai-ext-register-command
    api "memory"
    :description "Learning memory: status, observe, compact, show, undo, presets, budget"

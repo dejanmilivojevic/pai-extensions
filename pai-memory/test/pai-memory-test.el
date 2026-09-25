@@ -266,11 +266,63 @@
           (should (= (length launched) 2)))))))
 
 (ert-deftest pai-memory-turn-end-handler-registered ()
-  "The extension ticks the memory clocks on every turn-end."
-  (let ((pai--ext-handlers (make-hash-table :test 'eq)))
+  "The extension ticks the memory clocks on every turn-end -- not in subagents."
+  (let ((pai--ext-handlers (make-hash-table :test 'eq))
+        (ticked nil))
     (pai-memory-extension (pai-ext-api-create :id "memory-test"))
-    (should (memq #'pai-memory--on-turn-end
-                  (mapcar #'cdr (gethash 'turn-end pai--ext-handlers))))))
+    (let ((handlers (mapcar #'cdr (gethash 'turn-end pai--ext-handlers))))
+      (should (= (length handlers) 1))
+      (cl-letf (((symbol-function 'pai-memory--on-turn-end)
+                 (lambda (_e ctx) (push (plist-get ctx :buffer) ticked))))
+        (with-temp-buffer
+          (funcall (car handlers) '(:type turn-end) (list :buffer (current-buffer)))
+          (should (equal ticked (list (current-buffer))))
+          (setq ticked nil)
+          (setq pai-subagent-session (current-buffer))
+          (funcall (car handlers) '(:type turn-end) (list :buffer (current-buffer)))
+          (should-not ticked))))))
+
+(ert-deftest pai-memory-leaves-subagent-sessions-alone ()
+  "In a subagent's session memory neither feeds its prompts nor learns from it."
+  (pai-memory-test--with-owner buf dir
+    (let ((pai--ext-handlers (make-hash-table :test 'eq))
+          (called nil))
+      (pai-memory-extension (pai-ext-api-create :id "memory-test"))
+      (setq pai-subagent-session (current-buffer)) ; any live buffer: a subagent's
+      (let ((ctx (list :buffer buf :session session :cwd dir)))
+        (cl-letf (((symbol-function 'pai-memory--system-sections)
+                   (lambda (&rest _) (push 'snapshot called) '(:memory "M")))
+                  ((symbol-function 'pai-memory--on-session-start)
+                   (lambda (&rest _) (push 'session-start called)))
+                  ((symbol-function 'pai-memory--on-settled)
+                   (lambda (&rest _) (push 'settled called)))
+                  ((symbol-function 'pai-memory-recall-context-handler)
+                   (lambda (&rest _) (push 'recall called) '(:messages nil))))
+          (dolist (type '(system-prompt-sections session-start agent-settled context compact))
+            (dolist (h (mapcar #'cdr (gethash type pai--ext-handlers)))
+              (funcall h (list :type type :messages nil) ctx)))
+          ;; none of the memory work ran
+          (should-not called)
+          ;; the session file is private now, so nothing scanning the
+          ;; project's sessions later learns from it either
+          (should (pai-memory-private-p session))
+          ;; the flag reaches the file with the session's first messages
+          ;; (sessions are written once they have a user message)
+          (pai-memory-test--turns session 1)
+          (should (pai-memory-private-p (pai-session-load (pai-session-file session))))
+          ;; no widget
+          (let ((widget :unset))
+            (cl-letf (((symbol-function 'pai--set-widget) (lambda (_k v) (setq widget v))))
+              (pai-memory-refresh-widget))
+            (should (null widget)))
+          ;; the same handlers do run in the user's own sessions
+          (setq pai-subagent-session nil)
+          (dolist (h (mapcar #'cdr (gethash 'system-prompt-sections pai--ext-handlers)))
+            (funcall h '(:type system-prompt-sections) ctx))
+          (should (equal called '(snapshot)))))
+      ;; and its tools are never given to subagents
+      (should-not (pai-tool-subagent-allowed-p pai-memory-tool-def))
+      (should-not (pai-tool-subagent-allowed-p pai-memory-search-tool-def)))))
 
 (ert-deftest pai-memory-observer-commits-a-slice ()
   (pai-memory-test--with-settings '(:preset "custom" :session (:chunk-tokens 150 :observer-concurrency 1))

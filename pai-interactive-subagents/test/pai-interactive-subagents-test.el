@@ -548,6 +548,9 @@
                 (should (eq major-mode 'pai-mode))
                 (should (equal pai-isub--role "scout"))
                 (should (eq pai-isub--parent parent))
+                ;; marked as a subagent's session (memory leaves it alone)
+                (should (eq pai-subagent-session parent))
+                (should-not (pai-subagent-session-p parent))
                 (should (string-match-p "look at foo.el" (buffer-string)))
                 (should (string-match-p "child says hello" (buffer-string)))
                 ;; recursion guard, plus the way home
@@ -637,6 +640,19 @@
               (should (eq (window-in-direction 'right pwin) wa))
               (should (eq (window-in-direction 'right wa) wb))))
         (mapc #'kill-buffer (list parent a b))))))
+
+(ert-deftest pai-isub-child-drops-tools-kept-from-subagents ()
+  "A child session never keeps a tool marked `:subagent-exclude'."
+  (with-temp-buffer
+    (pai-ext-initialize-instance)
+    (pai-register-tool (list :name "x-memory" :description "d" :subagent-exclude t
+                             :parameters (pai-object-schema nil) :execute #'ignore))
+    (pai-register-tool (list :name "x-read" :description "d"
+                             :parameters (pai-object-schema nil) :execute #'ignore))
+    (pai-isub-session--restrict-tools nil)
+    (should-not (pai-tool-get "x-memory"))
+    (should (pai-tool-get "x-read"))
+    (pai-unregister-tool "x-read")))
 
 ;;;; Window layout
 
