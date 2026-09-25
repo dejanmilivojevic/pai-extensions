@@ -425,7 +425,10 @@ so they cannot contradict it.  Turning off also stops every worker."
              (t "Nothing to consolidate")))
       ("compact"
        (if (fboundp 'pai--compact-now)
-           (if (pai--compact-now nil 'manual) "Compaction done" "Nothing to compact")
+           (pcase (pai--compact-now nil 'manual)
+             ('queued "Compaction queued: the run compacts at its next turn boundary")
+             ('nil "Nothing to compact")
+             (_ "Compaction done"))
          "Compaction is not available here"))
       ((and (or "session" "learning")
             (guard (equal (nth 2 words) "--global")))

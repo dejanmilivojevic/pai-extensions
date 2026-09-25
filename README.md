@@ -162,6 +162,9 @@ enable one or the other, not both.
 - **Compaction from observations.** `/compact` and auto-compaction render the stored
   observations instead of asking a model for a summary. The recent part stays word
   for word. If the observers are behind, only the unobserved part is summarized.
+  This also applies when a long run crosses the threshold between two turns: the
+  run pauses, compacts without blocking Emacs (the gap summary streams in the
+  background, C-c C-c stops it), and then continues.
 - **Consolidation.** When the stored observations grow past ~20k tokens, a background
   consolidator files the oldest ones into per-session topic files and a short
   `JOURNEY.md` under `~/.pai/memory/projects/<project>/sessions/<id>/`. The

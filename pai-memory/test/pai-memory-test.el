@@ -480,7 +480,35 @@
                                   (plist-get res :summary)))
           ;; the kept tail is the recent part only
           (should (< (length (plist-get res :messages)) 12))
-          (should (equal (pai-message-role (nth 1 (plist-get res :messages))) 'user)))))))
+          ;; pi's cut: the tail may open mid-turn, never with a tool result
+          (should (memq (pai-message-role (nth 1 (plist-get res :messages)))
+                        '(user assistant))))))))
+
+(ert-deftest pai-memory-compact-async-handler-does-not-block ()
+  "With a :callback the handler answers (:async CANCEL) and finishes later."
+  (pai-memory-test--with-settings '(:session (:tail-tokens 100))
+    (pai-memory-test--with-session s dir
+      (let* ((e (pai-memory-test--turns s 6 300))
+             (emit nil) (got nil))
+        (pai-memory-test--commit s "r1" (nth 0 e) (nth 1 e) "User asked for u0")
+        (cl-letf (((symbol-function 'pai-provider-stream)
+                   (lambda (_m _c _o e) (setq emit e) nil)))
+          (let ((ret (pai-memory-compact-handler
+                      (list :messages (pai-memory-test--live s) :model 'model
+                            :callback (lambda (r) (setq got r)))
+                      (list :session s))))
+            (should (plist-member ret :async))
+            (should-not got)
+            ;; the gap summary streams in later (history, then a split
+            ;; turn's prefix)
+            (dotimes (_ 3)
+              (unless got
+                (funcall emit (list :type 'done :message
+                                    (pai-assistant-message
+                                     :content (list (pai-text "late gap"))
+                                     :stop-reason 'stop)))))
+            (should (equal (plist-get got :strategy) "observational+summary"))
+            (should (string-match-p "late gap" (plist-get got :summary)))))))))
 
 (ert-deftest pai-memory-compact-caps-the-pool ()
   (pai-memory-test--with-settings '(:session (:tail-tokens 10 :max-observation-tokens 30))

@@ -172,11 +172,11 @@ where B indexes BRANCH, and TAIL-ENTRIES are the source entries after B."
                         :deferred-schemas (plist-get carried :names))
     (pai-user-message text)))
 
-(defun pai-memory-compact (messages session model &optional summarize-fn)
-  "Compact live MESSAGES of SESSION from its observations; return a result or nil.
-The result has the shape `pai-ext-run-compact' expects.  MODEL summarizes
-the unobserved gap when observers lag, through SUMMARIZE-FN (default
-`pai-compaction-summarize', called with messages and model)."
+(defun pai-memory-compact--plan (messages session model)
+  "Plan the observational compaction of live MESSAGES of SESSION, or return nil.
+The plan holds everything but the gap summary: when observers lag -- the
+verbatim tail is over twice `:tail-tokens' -- and MODEL is given, `:gap' holds
+the unobserved messages to summarize and `:gap-kept' what then stays."
   (let* ((branch (pai-session-get-branch session))
          (target (or (pai-memory-get :session :tail-tokens session) 20000))
          (cut (pai-memory-compaction-cut branch target)))
@@ -193,44 +193,95 @@ the unobserved gap when observers lag, through SUMMARIZE-FN (default
         (when (and (< k (length rest))
                    (cl-every #'pai-memory--same-message-p (last rest k) tail-msgs))
           (let* ((kept (last rest k))
-                 (first-kept (plist-get (plist-get cut :first-kept) :id))
-                 (gap-summary nil) (usage nil)
-                 (strategy "observational"))
-            ;; observers lag: summarize the unobserved part of a long tail
+                 (plan (list :messages messages :session session :branch branch
+                             :system system :rest rest :cut cut :kept kept
+                             :first-kept (plist-get (plist-get cut :first-kept) :id))))
+            ;; observers lag: the unobserved part of a long tail gets summarized
             (when (and model (> (plist-get cut :tail-tokens) (* 2 target)))
               (let ((recent (pai-compaction--find-cut-index kept target)))
                 (when (and (> recent 0) (pai-memory-valid-cut-p (nth recent tail-entries)))
-                  (let ((result (funcall (or summarize-fn #'pai-compaction-summarize)
-                                         (seq-take kept recent) model)))
-                    (when (and (plist-get result :text)
-                               (not (string-empty-p (string-trim (plist-get result :text)))))
-                      (setq gap-summary (plist-get result :text)
-                            usage (plist-get result :usage)
-                            strategy "observational+summary"
-                            first-kept (plist-get (nth recent tail-entries) :id)
-                            kept (nthcdr recent kept)))))))
-            (let* ((pool (pai-memory-pool branch (1+ (plist-get cut :boundary))))
-                   (capped (pai-memory--cap-pool
-                            pool (pai-memory-get :session :max-observation-tokens session)))
-                   (archive (and (car capped) (pai-memory--write-archive session (car capped))))
-                   (dir (pai-memory-session-dir session))
-                   (text (pai-memory-render
-                          (cdr capped)
-                          :topics (pai-memory-session-topics dir) :dir dir
-                          :journey (pai-memory-session-journey dir)
-                          :reflections (pai-memory--branch-reflections branch)
-                          :archive-file archive :archived-count (length (car capped))
-                          :gap-summary gap-summary))
-                   (dropped (seq-take rest (- (length rest) (length kept))))
-                   (carried (pai-tool-carried-schemas dropped kept)))
-              (list :messages (append system
-                                      (list (pai-memory--summary-message text carried))
-                                      (pai-invalidate-usage-anchors kept))
-                    :summary text
-                    :strategy strategy
-                    :first-kept-entry-id first-kept
-                    :tokens-before (pai-estimate-context-tokens messages)
-                    :usage usage))))))))
+                  (setq plan (append plan
+                                     (list :gap (seq-take kept recent)
+                                           :gap-kept (nthcdr recent kept)
+                                           :gap-first-kept (plist-get (nth recent tail-entries) :id)))))))
+            plan))))))
+
+(defun pai-memory-compact--finish (plan &optional gap-result)
+  "Return the compaction result of PLAN, given GAP-RESULT for its `:gap'.
+GAP-RESULT is (:text S :usage U); without usable text the gap is kept
+verbatim and the strategy stays \"observational\"."
+  (let* ((session (plist-get plan :session))
+         (branch (plist-get plan :branch))
+         (cut (plist-get plan :cut))
+         (rest (plist-get plan :rest))
+         (text-ok (and (plist-get plan :gap)
+                       (stringp (plist-get gap-result :text))
+                       (not (string-empty-p (string-trim (plist-get gap-result :text))))))
+         (kept (if text-ok (plist-get plan :gap-kept) (plist-get plan :kept)))
+         (first-kept (if text-ok (plist-get plan :gap-first-kept) (plist-get plan :first-kept)))
+         (gap-summary (and text-ok (plist-get gap-result :text)))
+         (pool (pai-memory-pool branch (1+ (plist-get cut :boundary))))
+         (capped (pai-memory--cap-pool
+                  pool (pai-memory-get :session :max-observation-tokens session)))
+         (archive (and (car capped) (pai-memory--write-archive session (car capped))))
+         (dir (pai-memory-session-dir session))
+         (text (pai-memory-render
+                (cdr capped)
+                :topics (pai-memory-session-topics dir) :dir dir
+                :journey (pai-memory-session-journey dir)
+                :reflections (pai-memory--branch-reflections branch)
+                :archive-file archive :archived-count (length (car capped))
+                :gap-summary gap-summary))
+         (dropped (seq-take rest (- (length rest) (length kept))))
+         (carried (pai-tool-carried-schemas dropped kept)))
+    (list :messages (append (plist-get plan :system)
+                            (list (pai-memory--summary-message text carried))
+                            (pai-invalidate-usage-anchors kept))
+          :summary text
+          :strategy (if text-ok "observational+summary" "observational")
+          :first-kept-entry-id first-kept
+          :tokens-before (pai-estimate-context-tokens (plist-get plan :messages))
+          :usage (and text-ok (plist-get gap-result :usage)))))
+
+(defun pai-memory-compact (messages session model &optional summarize-fn)
+  "Compact live MESSAGES of SESSION from its observations; return a result or nil.
+The result has the shape `pai-ext-run-compact' expects.  MODEL summarizes
+the unobserved gap when observers lag, through SUMMARIZE-FN (called with
+messages and model; default: `pai-compaction-summarize-dropped', which
+follows pi and summarizes a split turn's prefix on its own).  Blocks while
+summarizing; see `pai-memory-compact-async'."
+  (let ((plan (pai-memory-compact--plan messages session model)))
+    (when plan
+      (pai-memory-compact--finish
+       plan
+       (when (plist-get plan :gap)
+         (if summarize-fn
+             (funcall summarize-fn (plist-get plan :gap) model)
+           (let (out)
+             (pai-compaction-summarize-dropped (plist-get plan :gap) (plist-get plan :gap-kept)
+                                               model nil (lambda (r) (setq out r)) t)
+             out)))))))
+
+(defun pai-memory-compact-async (messages session model callback)
+  "Compact like `pai-memory-compact' without blocking on the gap summary.
+Call CALLBACK once with the result, or nil when observational compaction
+does not apply (then before returning).  Return a function cancelling the
+gap summary, or nil when nothing is pending."
+  (let ((plan (pai-memory-compact--plan messages session model)))
+    (cond
+     ((null plan) (funcall callback nil) nil)
+     ((null (plist-get plan :gap))
+      (funcall callback (pai-memory-compact--finish plan)) nil)
+     (t
+      (pai-compaction-summarize-dropped
+       (plist-get plan :gap) (plist-get plan :gap-kept) model nil
+       (lambda (gap-result)
+         (unless (equal (plist-get gap-result :error) "cancelled")
+           (funcall callback
+                    (condition-case err (pai-memory-compact--finish plan gap-result)
+                      (error (message "pai-memory: observational compaction failed, using summary: %s"
+                                      (error-message-string err))
+                             nil))))))))))
 
 (defun pai-memory-compact-handler (event ctx)
   "The `compact' extension handler: observational compaction when possible.
@@ -243,7 +294,21 @@ observations can replace the older context yet."
                (pai-memory-session-enabled-p session)
                (or (null instructions) (string-empty-p (string-trim instructions))))
       (condition-case err
-          (pai-memory-compact (plist-get event :messages) session (plist-get event :model))
+          (let ((callback (plist-get event :callback)))
+            (if (not callback)
+                (pai-memory-compact (plist-get event :messages) session (plist-get event :model))
+              ;; asynchronous caller (compaction mid-run): never block on the
+              ;; gap summary
+              (let* ((answered nil) (sync-result nil)
+                     (cancel (pai-memory-compact-async
+                              (plist-get event :messages) session (plist-get event :model)
+                              (lambda (r)
+                                (if answered (funcall callback r)
+                                  (setq answered t sync-result r))))))
+                (if answered
+                    sync-result
+                  (setq answered t)
+                  (list :async cancel)))))
         (error (message "pai-memory: observational compaction failed, using summary: %s"
                         (error-message-string err))
                nil)))))
