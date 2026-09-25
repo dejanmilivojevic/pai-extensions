@@ -579,7 +579,6 @@ branches of that session are labelled."
         :label "Memory search"
         :description "Search what pai remembers: past conversations of this project (or all projects), observations, compaction summaries, session topic files, long-term memory and skills. Full-text search without any model call; returns the stored text. Use it when the user refers to earlier work (\"like last time\", \"what did we decide about X\"). Modes: search {query, scope?: project|session|all, kinds?: [message, observation, compaction, topic, memory, skill], limit?}; scroll around a hit {session_id, around, window?}; read a memory file {path}."
         :prompt-snippet "memory_search: search past sessions and memory"
-        :subagent-exclude t
         :parameters (pai-object-schema
                      (list :query (pai-string-schema "Words to search for (3+ letters work best).")
                            :scope (pai-string-schema "project (default), session or all" :enum ["project" "session" "all"])

@@ -953,12 +953,14 @@ A blank number restores the built-in default."
 
 ;;;; Subagent sessions
 ;;
-;; A subagent's chat buffer (`pai-subagent-session') is left alone: no memory
-;; snapshot or recall in its prompts, no observers, consolidation, promotion
-;; or skill statistics, no widget, no memory tools (`:subagent-exclude').  Its
-;; session file is marked private once, so catch-up, promotion and the search
-;; index -- which scan the project's session files from other buffers -- skip
-;; it too.
+;; Memory is read-only in a subagent's chat buffer (`pai-subagent-session'):
+;; its prompts get the memory snapshot and recall, and it may use
+;; `memory_search', but no memory worker ever runs for it -- no observers,
+;; consolidation, promotion, reflection or curation -- nor does it change
+;; memory: no skill statistics, no `memory' tool (`:subagent-exclude').  Its
+;; session is marked a subagent's in its file (`:subagent' session state), so
+;; the session and learning layers stay off for it even when other buffers
+;; scan the project's sessions (catch-up, promotion).
 
 (defun pai-memory-subagent-buffer-p (&optional buffer)
   "Return non-nil when BUFFER (default current) is a subagent's session."
@@ -971,13 +973,13 @@ A blank number restores the built-in default."
       (funcall handler event ctx))))
 
 (defun pai-memory--on-subagent-start (_event ctx)
-  "Mark a subagent's session private, so nothing learns from its file."
+  "Mark a subagent's session as such in its file: memory is read-only there."
   (let ((buf (plist-get ctx :buffer))
         (session (plist-get ctx :session)))
     (when (and session (pai-memory-subagent-buffer-p buf)
-               (not (pai-memory-private-p session)))
-      (condition-case err (pai-memory-set-private session t)
-        (error (message "pai-memory: could not mark subagent session private: %s"
+               (not (pai-memory-subagent-session-p session)))
+      (condition-case err (pai-memory-set-session-state session :subagent t)
+        (error (message "pai-memory: could not mark the subagent session: %s"
                         (error-message-string err)))))))
 
 ;;;; Extension entry point
@@ -994,7 +996,7 @@ A blank number restores the built-in default."
   (pai-ext-on api 'session-tree (pai-memory--user-sessions-only #'pai-memory--on-refresh))
   (pai-ext-on api 'reload (pai-memory--user-sessions-only #'pai-memory--on-refresh))
   (pai-ext-on api 'compact (pai-memory--user-sessions-only #'pai-memory-compact-handler))
-  (pai-ext-on api 'system-prompt-sections (pai-memory--user-sessions-only #'pai-memory--system-sections))
+  (pai-ext-on api 'system-prompt-sections #'pai-memory--system-sections) ; subagents read memory too
   (pai-ext-on api 'session-shutdown (pai-memory--user-sessions-only #'pai-memory--on-session-end))
   (pai-ext-on api 'session-before-switch (pai-memory--user-sessions-only #'pai-memory--on-session-end))
   (pai-ext-register-command
@@ -1042,7 +1044,7 @@ A blank number restores the built-in default."
    :handler #'pai-memory-learn-command)
   (pai-ext-register-tool api pai-memory-tool-def)
   (pai-ext-register-tool api pai-memory-search-tool-def)
-  (pai-ext-on api 'context (pai-memory--user-sessions-only #'pai-memory-recall-context-handler))
+  (pai-ext-on api 'context #'pai-memory-recall-context-handler) ; recall is reading: subagents too
   (pai-ext-register-command
    api "memory"
    :description "Learning memory: status, observe, compact, show, undo, presets, budget"

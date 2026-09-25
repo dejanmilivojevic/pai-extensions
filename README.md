@@ -296,11 +296,12 @@ Scoped models, or with `/scoped-models memory-observer <id> [thinking level]`; e
 role also has a thinking level there (unset: inherited from `task`/`main`, else off). To opt out, use `/memory session off` for one
 session, or set the preset to `off` in `/menu` → Memory.
 
-Subagents are left out of memory entirely: an interactive subagent's session gets no
-memory snapshot or recall, runs no observers, consolidation or promotion, shows no
-memory widget and is marked private (so nothing scanning the project's sessions
-learns from it later); no subagent -- interactive or headless -- gets the `memory`
-or `memory_search` tools.
+Memory is read-only for subagents: their prompts get the memory snapshot (and, in
+interactive subagents, recall), and they can use `memory_search`, but no memory
+worker ever runs for them -- no observers, consolidation, promotion, reflection or
+curation -- and they cannot change memory (no `memory` tool, no skill statistics).
+An interactive subagent's session is marked as such in its file, so nothing scanning
+the project's sessions later learns from it either.
 
 | Command | Effect |
 |---|---|

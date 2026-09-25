@@ -465,13 +465,20 @@ foreground tool call (nil for background runs)."
            (inherited (when (eq context-mode 'fork)
                         (seq-filter (lambda (m) (not (pai-system-message-p m)))
                                     pai--context-messages)))
+           (tools (pai-subagents--child-tools role))
            (sys (pai-system-message
                  (pai-build-system-prompt
                   :cwd default-directory
-                  :tools (pai-tools-all)
+                  ;; the tools the child really has
+                  :tools tools
+                  ;; the parent's extension sections: the memory snapshot
+                  ;; (subagents read memory, they never write it)
+                  :sections (and (fboundp 'pai-ext-run-system-prompt-sections)
+                                 (fboundp 'pai--ext-context)
+                                 (ignore-errors
+                                   (pai-ext-run-system-prompt-sections (pai--ext-context))))
                   :addendum (plist-get (pai-subagents-role role) :prompt))))
            (messages (append (list sys) inherited (list (pai-user-message task))))
-           (tools (pai-subagents--child-tools role))
            (id (format "sub-%d" (cl-incf pai-subagents--counter)))
            (entry (list :id id :role role :task task :status "running"
                         :model (pai-model-key (car resolved))

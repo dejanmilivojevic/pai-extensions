@@ -127,6 +127,32 @@
           (pai-unregister-tool "x-memory"))
       (pai-subagents-test--teardown buf))))
 
+(ert-deftest pai-subagents-children-read-memory-in-their-prompt ()
+  "The child's system prompt carries the parent's sections (the memory
+snapshot) and describes only the tools the child really has."
+  (let ((buf (pai-subagents-test--setup)) (ctx nil))
+    (unwind-protect
+        (with-current-buffer buf
+          (pai-register-extension
+           (lambda (api)
+             (pai-ext-on api 'system-prompt-sections
+                         (lambda (_e _c) '(:memory "SNAPSHOT-FOR-CHILD")))))
+          (pai-register-tool (list :name "x-writer" :description "WRITES-MEMORY-TOOL"
+                                   :subagent-exclude t :deferred :false
+                                   :parameters (pai-object-schema nil) :execute #'ignore))
+          (cl-letf (((symbol-function 'pai-agent-run)
+                     (lambda (_prompts context &rest _) (setq ctx context) 'fake-run))
+                    ((symbol-function 'pai-agent-abort) #'ignore))
+            (pai-subagents-test--execute (list :agent "scout" :task "t") buf))
+          (let ((system (pai-content-text (pai-message-content
+                                           (car (plist-get ctx :messages))))))
+            (should (string-match-p "SNAPSHOT-FOR-CHILD" system))
+            (should-not (string-match-p "x-writer" system)))
+          (should-not (seq-find (lambda (tl) (equal (plist-get tl :name) "x-writer"))
+                                (plist-get ctx :tools)))
+          (pai-unregister-tool "x-writer"))
+      (pai-subagents-test--teardown buf))))
+
 (ert-deftest pai-subagents-recursion-guard-and-stop ()
   "Children never see the subagent tool; stop terminates a run."
   (let ((buf (pai-subagents-test--setup)))

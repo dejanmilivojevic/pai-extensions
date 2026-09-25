@@ -252,15 +252,25 @@ already remembered is still used."
   "Return non-nil when SESSION was made private with `/memory private'."
   (and session (pai-truthy (car (pai-memory--override session :private)))))
 
+(defun pai-memory-subagent-session-p (&optional session)
+  "Return non-nil when SESSION belongs to a subagent.
+Memory is read-only there: its snapshot and recall are used, but no
+observer, consolidator or promoter ever runs for it.  Recorded in the
+session file, so code scanning sessions from other buffers sees it too."
+  (and session (pai-truthy (car (pai-memory--override session :subagent)))))
+
 (defun pai-memory-session-enabled-p (&optional session)
-  "Return non-nil when the session layer is on for SESSION (never when private)."
+  "Return non-nil when the session layer is on for SESSION.
+Never when private or a subagent's."
   (and (not (pai-memory-private-p session))
+       (not (pai-memory-subagent-session-p session))
        (pai-truthy (pai-memory-get :session :enabled session))))
 
 (defun pai-memory-learning-enabled-p (&optional session)
   "Return non-nil when the long-term layer and automatic learning are on.
-Never for a private session."
+Never for a private or a subagent's session."
   (and (not (pai-memory-private-p session))
+       (not (pai-memory-subagent-session-p session))
        (pai-truthy (pai-memory-get :long-term :enabled session))
        (let ((o (pai-memory--override session :learning)))
          (if o (pai-truthy (car o)) t))))
