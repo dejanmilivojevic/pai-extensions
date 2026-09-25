@@ -14,6 +14,8 @@
 ;; Keys:
 ;;   RET  open the item (file, source messages, review buffer)
 ;;   e    edit: a memory entry through the logged, undoable path; files open
+;;   m    move a memory entry to another memory (user, memory, project,
+;;        team): one logged change, `/memory undo' moves it back
 ;;   d    remove: a memory entry (logged), an observation (hidden with
 ;;        `memory.redacted'), a learned skill (archived), a proposal (rejected)
 ;;   s    show where an observation came from (the session's messages)
@@ -55,6 +57,7 @@
     (define-key m (kbd "RET") #'pai-memory-browse-open)
     (define-key m "e" #'pai-memory-browse-edit)
     (define-key m "d" #'pai-memory-browse-delete)
+    (define-key m "m" #'pai-memory-browse-move)
     (define-key m "s" #'pai-memory-browse-source)
     (define-key m "/" #'pai-memory-browse-search)
     (define-key m "w" #'pai-memory-browse-why)
@@ -129,7 +132,7 @@
          (inhibit-read-only t))
     (erase-buffer)
     (insert (propertize "Memory" 'face 'pai-memory-browse-heading)
-            (propertize "   RET open · e edit · d remove · s source · w why · P pin · / search · g refresh · q quit\n"
+            (propertize "   RET open · e edit · m move · d remove · s source · w why · P pin · / search · g refresh · q quit\n"
                         'face 'pai-memory-browse-dim))
     ;; long-term memory
     (pai-memory-browse--heading "Long-term memory")
@@ -293,6 +296,37 @@
          (pai-memory-browse-refresh)))
       ((or 'file 'skill) (pai-memory-browse-open))
       (_ (user-error "Nothing to edit here")))))
+
+(defun pai-memory-browse-move (&optional target)
+  "Move the memory entry at point to memory TARGET (asked for).
+The entry keeps its pin, confirmations and history; `/memory undo' moves it
+back."
+  (interactive)
+  (let ((item (pai-memory-browse--item)))
+    (unless (eq (plist-get item :type) 'ltm) (user-error "`m' moves long-term memory entries"))
+    (let* ((from (plist-get item :target))
+           (cwd (pai-memory-browse--cwd))
+           (choices (or (delete (format "%s" from)
+                                (mapcar #'symbol-name (pai-memory-active-targets cwd)))
+                        (user-error "No other memory to move it to")))
+           (to (or target (pai-memory-read-target (format "Move from %s to: " from) choices)))
+           (r (pai-memory-browse--in-owner
+                (pai-memory-move-entry (plist-get item :entry) from to
+                                       (list :cwd default-directory
+                                             :session (and (boundp 'pai--session) pai--session))))))
+      (message (if (plist-get r :ok)
+                   (format "Moved to %s (/memory undo moves it back)"
+                           (file-name-nondirectory (pai-memory-target-file to cwd)))
+                 (plist-get r :error)))
+      (pai-memory-browse-refresh)
+      ;; stay on the moved entry
+      (when (plist-get r :ok)
+        (goto-char (point-min))
+        (let ((pos (text-property-search-forward
+                    'pai-memory-item (plist-get r :text)
+                    (lambda (text item) (and (eq (plist-get item :type) 'ltm)
+                                             (equal (plist-get item :entry) text))))))
+          (when pos (goto-char (prop-match-beginning pos))))))))
 
 (defun pai-memory-browse-delete ()
   "Remove the item at point (asks first)."

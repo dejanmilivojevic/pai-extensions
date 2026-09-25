@@ -296,8 +296,8 @@ session, or set the preset to `off` in `/menu` → Memory.
 | `/memory resume` | Lift a budget pause (or a stop) for this session |
 | `/memory show` | Long-term memory as saved now |
 | `/memory undo [ID]` | Undo the newest (or a given) memory or skill change |
-| `/memory-review` (or `/memory review`) | Review pending proposals |
-| `/memory-browse` | Browse memory: entries, topics, observations, skills, proposals; edit, remove, see sources, search |
+| `/memory-review` (or `/memory review`) | Review pending proposals; `m` sends a proposed entry to another memory (user, memory, project, team) before you accept it |
+| `/memory-browse` | Browse memory: entries, topics, observations, skills, proposals; edit, move (`m`, e.g. from MEMORY.md to the project's memory, undoable), remove, see sources, search |
 | `/learn [what] [--from URL\|BUFFER\|FILE\|DIR ...]` | Capture a reusable skill from this session, or from docs, code or pages you name |
 | `/memory promote` | Run the promoter over this session now |
 | `/memory search WORDS` | Full-text search of past sessions, observations, topics, memory and skills |

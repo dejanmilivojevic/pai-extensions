@@ -107,6 +107,14 @@ the limit is right even outside that project's pai buffer."
     ('project "This project (project MEMORY.md)")
     ('team "This project's team memory (PROJECT.md, shared in the repository)")))
 
+(defun pai-memory-read-target (prompt choices)
+  "Read one of the memory target CHOICES (strings) with PROMPT; return it.
+Candidates show each target's title, e.g. \"project  This project (project MEMORY.md)\"."
+  (let* ((table (mapcar (lambda (c) (cons (format "%-8s %s" c (pai-memory-target-title c)) c))
+                        choices))
+         (pick (completing-read prompt (mapcar #'car table) nil t)))
+    (or (cdr (assoc pick table)) (user-error "No memory chosen"))))
+
 ;;;; Entries
 
 (defun pai-memory-parse-entries (text)
@@ -332,6 +340,83 @@ built-in provider's result, (:ok t ...) or (:error MESSAGE)."
           (run-at-time 0 nil #'pai-memory--call-provider ext :on-change change ctx))))
     result))
 
+(defvar pai-memory--applied-this-session)
+(declare-function pai-memory-entries "pai-memory-entries" (target cwd))
+(declare-function pai-memory-entries-note-move "pai-memory-entries" (text from to cwd change-id))
+
+(defun pai-memory-move-entry (quote from to &optional ctx origin)
+  "Move the entry of target FROM containing QUOTE to target TO.
+Both files are written and logged as one grouped change, so `/memory undo'
+reverts the move as a whole; the entry keeps its metadata (pin,
+confirmations, expiry, history).  TO's size limit and duplicate check
+apply, and team memory only in trusted projects.  CTX supplies :cwd and
+:session; ORIGIN is logged (default \"browser\").  Return (:ok t :id ID
+:text TEXT) or (:error MESSAGE)."
+  (condition-case err
+      (let* ((ctx (or ctx (list :cwd default-directory
+                                :session (and (boundp 'pai--session) pai--session))))
+             (from (pai-memory--target from))
+             (to (pai-memory--target to))
+             (cwd (or (plist-get ctx :cwd) default-directory))
+             (session (plist-get ctx :session)))
+        (when (eq from to) (user-error "The entry is already in %s" to))
+        (unless (and (memq from (pai-memory-active-targets cwd))
+                     (memq to (pai-memory-active-targets cwd)))
+          (user-error "Team memory is only used in trusted projects"))
+        ;; make sure the entry has a metadata record to carry over
+        (when (fboundp 'pai-memory-entries) (ignore-errors (pai-memory-entries from cwd)))
+        (let* ((from-file (pai-memory-target-file from cwd))
+               (to-file (pai-memory-target-file to cwd))
+               (from-before (pai-memory--read-file from-file))
+               (from-entries (pai-memory-parse-entries from-before))
+               (i (pai-memory--find-entry from-entries quote))
+               (text (nth i from-entries))
+               (from-after (pai-memory-render-entries
+                            (append (seq-take from-entries i) (nthcdr (1+ i) from-entries))))
+               (to-before (pai-memory--read-file to-file))
+               (to-entries (condition-case nil
+                               (pai-memory-change-entries (pai-memory-parse-entries to-before)
+                                                          (list :action 'add :content text))
+                             (user-error (user-error "%s already holds this entry; remove it here instead"
+                                                     (file-name-nondirectory to-file)))))
+               (moved (car (last to-entries)))
+               (to-after (pai-memory-render-entries to-entries))
+               (limit (pai-memory-target-limit to session cwd)))
+          (when (and limit (> (length to-after) limit)
+                     (not (and (fboundp 'pai-memory-retrieval-mode-p)
+                               (pai-memory-retrieval-mode-p session))))
+            (user-error "%s would grow to %d characters, over its %d limit; make room there first"
+                        (file-name-nondirectory to-file) (length to-after) limit))
+          (pai-memory--write-file from-file from-after)
+          (pai-memory--write-file to-file to-after)
+          (let* ((id (pai-memory--new-id))
+                 (meta (and (fboundp 'pai-memory-entries-note-move)
+                            (pai-memory-entries-note-move moved from to cwd id)))
+                 (record (list :id id :time (format-time-string "%FT%T%z")
+                               :action "move" :target (symbol-name to) :from (symbol-name from)
+                               :file (abbreviate-file-name to-file)
+                               :content moved :old text
+                               :origin (or origin "browser") :proposal_id ""
+                               :session (if session (pai-session-id session) "")
+                               :group (vconcat
+                                       (list (list :op "write" :file from-file
+                                                   :before from-before :after from-after)
+                                             (list :op "write" :file to-file
+                                                   :before to-before :after to-after))
+                                       (and meta (list meta))))))
+            (pai-memory--log record)
+            (cl-incf pai-memory--applied-this-session)
+            ;; an external provider sees the move as a remove and an add
+            (let ((ext (pai-memory-active-provider session)))
+              (when ext
+                (run-at-time 0 nil #'pai-memory--call-provider ext :on-change
+                             (list :action 'remove :target from :old text) ctx)
+                (run-at-time 0 nil #'pai-memory--call-provider ext :on-change
+                             (list :action 'add :target to :content moved) ctx)))
+            (list :ok t :id id :text moved))))
+    (user-error (list :error (error-message-string err)))
+    (error (list :error (format "memory move failed: %s" (error-message-string err))))))
+
 (defun pai-memory-snapshot (ctx)
   "Return the `<memory>' system-prompt section text for CTX, or nil.
 CTX supplies :cwd and :session.  Nil when the long-term layer is off."
@@ -395,10 +480,13 @@ again since, and undo refuses rather than lose the later change."
 ;;   (:op "write" :file F :before B :after A :created BOOL)
 ;;   (:op "move"  :from DIR :to DIR)
 ;;   (:op "usage" :name NAME :before RECORD-OR-:null)
+;;   (:op "entry-move" :record ID :from-target T :from-file F
+;;                     :to-target T :to-file F)   an entry's metadata moved
 ;; `pai-memory-undo' reverts the whole group, newest operation first, and
 ;; only when every file still holds what the group wrote.
 
 (declare-function pai-memory--usage-set "pai-memory-skills" (name record))
+(declare-function pai-memory-entries-undo-move "pai-memory-entries" (op))
 
 (defun pai-memory--group-intact-p (group)
   "Return nil when GROUP's results were changed since; else t."
@@ -430,7 +518,10 @@ again since, and undo refuses rather than lose the later change."
           ("usage"
            (when (fboundp 'pai-memory--usage-set)
              (pai-memory--usage-set (plist-get op :name)
-                                    (let ((b (plist-get op :before))) (and (listp b) b)))))))
+                                    (let ((b (plist-get op :before))) (and (listp b) b)))))
+          ("entry-move"
+           (when (fboundp 'pai-memory-entries-undo-move)
+             (pai-memory-entries-undo-move op)))))
       (pai-memory--log (list :id (pai-memory--new-id) :time (format-time-string "%FT%T%z")
                              :action "undo" :undoes (plist-get rec :id) :target (plist-get rec :target)
                              :file "" :session (let ((s (plist-get ctx :session))) (if s (pai-session-id s) ""))))

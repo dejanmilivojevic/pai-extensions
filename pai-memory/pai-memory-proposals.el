@@ -513,6 +513,50 @@ moved on is marked stale."
             (pai-memory--set-status p "stale" :reason (plist-get result :error))))
         result)))))
 
+(defconst pai-memory-retargetable-kinds '("memory-add" "team-memory-add")
+  "Proposal kinds whose target can change before they are accepted.
+Replace, remove and confirm proposals name an entry of one file.")
+
+(defun pai-memory-proposal-retarget-choices (p)
+  "Return the targets pending proposal P can move to, as strings."
+  (when (member (plist-get p :kind) pai-memory-retargetable-kinds)
+    (delete (plist-get p :target)
+            (mapcar #'symbol-name (pai-memory-active-targets (plist-get p :cwd))))))
+
+(defun pai-memory-proposal-retarget (id target)
+  "Point pending proposal ID, which adds an entry, at memory TARGET instead.
+The proposal is rebuilt for TARGET -- diff, size limit, duplicate check and
+the trust rule of team memory are redone -- and keeps its id, creation time
+and any other fields; `:retargeted-from' records the original target.
+Switching to or from team memory switches the kind between `memory-add'
+and `team-memory-add'.  Return the saved proposal, or signal a
+`user-error'."
+  (let ((p (pai-memory-proposal-load id)))
+    (unless (and p (equal (plist-get p :status) "pending"))
+      (user-error "No pending proposal %s" id))
+    (unless (member (plist-get p :kind) pai-memory-retargetable-kinds)
+      (user-error "Only proposals that add an entry can move to another memory"))
+    (let ((to (symbol-name (pai-memory--target target)))
+          (from (plist-get p :target)))
+      (when (equal to from) (user-error "It already goes to %s" to))
+      (let ((new (pai-memory-make-proposal
+                  :kind (if (equal to "team") "team-memory-add" "memory-add")
+                  :target to :content (plist-get p :content)
+                  :rationale (plist-get p :rationale) :evidence (plist-get p :evidence)
+                  :session-id (plist-get p :session) :cwd (plist-get p :cwd)
+                  :expires (plist-get p :expires))))
+        ;; keep the proposal's identity and whatever else it carries
+        (setq new (plist-put new :id id))
+        (setq new (plist-put new :created (plist-get p :created)))
+        (let ((rest p))
+          (while rest
+            (unless (plist-member new (car rest))
+              (setq new (plist-put new (car rest) (cadr rest))))
+            (setq rest (cddr rest))))
+        (setq new (plist-put new :retargeted-from
+                             (or (plist-get p :retargeted-from) from)))
+        (pai-memory-proposal-save new)))))
+
 (defun pai-memory-proposal-reject (id &optional reason)
   "Reject pending proposal ID, recording REASON for later promoter runs."
   (let ((p (pai-memory-proposal-load id)))

@@ -248,6 +248,43 @@ Return FN's value, or signal a `user-error' when no record matches."
           (pai-memory--meta-save records)))
     (error (message "pai-memory: entry metadata not updated: %s" (error-message-string err)))))
 
+(defun pai-memory-entries-note-move (text from to cwd change-id)
+  "Re-point the metadata of entry TEXT from target FROM to TO after a move.
+The record keeps its identity, pin, confirmations, expiry and history, and
+notes CHANGE-ID.  Return the `entry-move' undo operation, or nil when TEXT
+has no record."
+  (condition-case err
+      (let* ((records (pai-memory--meta-load))
+             (from-key (pai-memory--file-key (pai-memory-target-file from cwd)))
+             (to-key (pai-memory--file-key (pai-memory-target-file to cwd)))
+             (h (pai-memory--entry-hash text))
+             (r (seq-find (lambda (r) (and (equal (plist-get r :file) from-key)
+                                           (pai-memory--live-p r)
+                                           (equal (plist-get r :text_hash) h)))
+                          records)))
+        (when r
+          (plist-put r :target (format "%s" to))
+          (plist-put r :file to-key)
+          (plist-put r :updated (format-time-string "%FT%T%z"))
+          (plist-put r :changes (vconcat (delete-dups (append (pai-memory--vec (plist-get r :changes))
+                                                              (list change-id)))))
+          (pai-memory--meta-save records)
+          (list :op "entry-move" :record (plist-get r :id)
+                :from-target (format "%s" from) :from-file from-key
+                :to-target (format "%s" to) :to-file to-key)))
+    (error (message "pai-memory: entry metadata not moved: %s" (error-message-string err))
+           nil)))
+
+(defun pai-memory-entries-undo-move (op)
+  "Point the record of `entry-move' operation OP back to where it came from."
+  (let* ((records (pai-memory--meta-load))
+         (r (seq-find (lambda (r) (equal (plist-get r :id) (plist-get op :record))) records)))
+    (when r
+      (plist-put r :target (plist-get op :from-target))
+      (plist-put r :file (plist-get op :from-file))
+      (plist-put r :updated (format-time-string "%FT%T%z"))
+      (pai-memory--meta-save records))))
+
 (defun pai-memory-entry-confirm (target cwd old &optional session proposal)
   "Record that entry OLD of TARGET was confirmed again; return its record."
   (pai-memory--update-record

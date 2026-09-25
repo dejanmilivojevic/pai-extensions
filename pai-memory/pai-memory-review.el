@@ -8,6 +8,8 @@
 ;;   a    accept (risky proposals ask first)
 ;;   r    reject, with an optional reason the promoter sees next time
 ;;   e    edit the proposed text, then C-c C-c accepts it (C-c C-k cancels)
+;;   m    move a proposed entry to another memory (user, memory, project,
+;;        team) before accepting it
 ;;   G    accept a project skill and `git add' it (never commits)
 ;;   A    accept every unflagged pending proposal of the same kind
 ;;        (⛔ blocking findings are never accepted in bulk)
@@ -40,6 +42,7 @@
     (define-key m "a" #'pai-memory-review-accept)
     (define-key m "r" #'pai-memory-review-reject)
     (define-key m "e" #'pai-memory-review-edit)
+    (define-key m "m" #'pai-memory-review-move)
     (define-key m "A" #'pai-memory-review-accept-kind)
     (define-key m "G" #'pai-memory-review-accept-git)
     (define-key m "t" #'pai-memory-review-test)
@@ -159,7 +162,7 @@
         (pending (pai-memory-proposals "pending")))
     (erase-buffer)
     (insert (propertize (format "Memory proposals: %d pending" (length pending)) 'face 'bold)
-            "   RET details · a accept · r reject · e edit · t test-run · G accept + git add · A accept all of kind · q quit\n\n")
+            "   RET details · a accept · r reject · e edit · m move to another memory · t test-run · G accept + git add · A accept all of kind · q quit\n\n")
     (if (null pending)
         (insert "Nothing to review.\n")
       (dolist (p pending)
@@ -336,6 +339,23 @@ A project skill in a git repository may also be staged (see
       (_ (when (pai-memory-review--confirm p)
            (pai-memory-review--accept-into-git p nil)
            (pai-memory-review-refresh))))))
+
+(defun pai-memory-review-move (&optional target)
+  "Move the proposed entry at point to memory TARGET (asked for) before accepting.
+Only proposals that add an entry can move; the diff and checks are redone
+for the new memory."
+  (interactive)
+  (let* ((p (pai-memory-review--require))
+         (choices (or (pai-memory-proposal-retarget-choices p)
+                      (user-error (if (member (plist-get p :kind) pai-memory-retargetable-kinds)
+                                      "No other memory to move it to"
+                                    "Only proposals that add an entry can move to another memory"))))
+         (to (or target (pai-memory-read-target
+                         (format "Move from %s to: " (plist-get p :target)) choices))))
+    (pai-memory-proposal-retarget (plist-get p :id) to)
+    (message "Proposal now goes to %s (%s); a accepts it" to
+             (file-name-nondirectory (pai-memory-target-file to (plist-get p :cwd))))
+    (pai-memory-review-refresh)))
 
 (defun pai-memory-review-reject (&optional reason)
   "Reject the proposal at point with REASON (asked for interactively)."
