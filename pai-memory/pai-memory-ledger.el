@@ -34,10 +34,25 @@
 
 ;;;; Entries
 
+(defvar pai-memory--entry-message-cache (make-hash-table :test 'eq :weakness 'key)
+  "Messages of session entries: ENTRY -> (SOURCE . MESSAGE).
+The ledger walks the whole branch several times per turn (gauges, observer
+slices, cuts); converting an entry copies and re-symbolizes its content, so
+the result is kept per entry object (weakly).  SOURCE, the entry's raw
+`:message' or `:content', must still be the same object for a hit.")
+
 (defun pai-memory-entry-message (entry)
-  "Return the LLM message ENTRY becomes, or nil (system prompt excluded)."
-  (let ((m (pai-session--entry-to-message entry)))
-    (and m (not (pai-system-message-p m)) m)))
+  "Return the LLM message ENTRY becomes, or nil (system prompt excluded).
+Memoized per entry (see `pai-memory--entry-message-cache'); callers must
+not modify the returned message."
+  (let* ((source (or (plist-get entry :message) (plist-get entry :content)))
+         (hit (gethash entry pai-memory--entry-message-cache)))
+    (if (and hit (eq (car hit) source))
+        (cdr hit)
+      (let* ((m (pai-session--entry-to-message entry))
+             (m (and m (not (pai-system-message-p m)) m)))
+        (puthash entry (cons source m) pai-memory--entry-message-cache)
+        m))))
 
 (defun pai-memory-source-entry-p (entry)
   "Return non-nil when ENTRY is part of the observable transcript."

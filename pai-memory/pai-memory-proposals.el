@@ -98,17 +98,41 @@
          (ignore-errors (with-temp-buffer (insert-file-contents file)
                                           (pai-json-decode (buffer-string)))))))
 
+(defvar pai-memory--proposals-cache nil
+  "(DIR STAMP . PROPOSALS): the parsed proposals of DIR as of STAMP.
+The memory widget counts pending proposals after every turn; reading and
+parsing every proposal file each time was a steady source of garbage.")
+
+(defun pai-memory--proposals-stamp (dir)
+  "Return the state of proposal DIR: each file's name, size and mtime.
+Any write goes through a rename, so a changed proposal changes its entry."
+  (mapcar (lambda (f) (list (car f) (file-attribute-size (cdr f))
+                            (file-attribute-modification-time (cdr f))))
+          (directory-files-and-attributes dir nil "\\.json\\'" t)))
+
+(defun pai-memory--proposals-all (dir)
+  "Return every proposal in DIR, oldest first (cached until DIR changes)."
+  (let ((stamp (pai-memory--proposals-stamp dir))
+        (cache pai-memory--proposals-cache))
+    (if (and cache (equal (car cache) dir) (equal (cadr cache) stamp))
+        (cddr cache)
+      (let ((all (sort (delq nil (mapcar (lambda (f)
+                                           (ignore-errors
+                                             (with-temp-buffer
+                                               (insert-file-contents (expand-file-name (car f) dir))
+                                               (pai-json-decode (buffer-string)))))
+                                         stamp))
+                       (lambda (a b) (string< (plist-get a :id) (plist-get b :id))))))
+        (setq pai-memory--proposals-cache (cons dir (cons stamp all)))
+        all))))
+
 (defun pai-memory-proposals (&optional status)
-  "Return proposals, oldest first; only those with STATUS when non-nil."
+  "Return proposals, oldest first; only those with STATUS when non-nil.
+The returned plists are shared with a cache: copy one before changing it."
   (let ((dir (pai-memory-proposals-dir)))
     (when (file-directory-p dir)
       (seq-filter (lambda (p) (or (null status) (equal (plist-get p :status) status)))
-                  (sort (delq nil (mapcar (lambda (f)
-                                            (ignore-errors
-                                              (with-temp-buffer (insert-file-contents f)
-                                                                (pai-json-decode (buffer-string)))))
-                                          (directory-files dir t "\\.json\\'")))
-                        (lambda (a b) (string< (plist-get a :id) (plist-get b :id))))))))
+                  (pai-memory--proposals-all dir)))))
 
 (defun pai-memory-pending-count ()
   "Return how many proposals wait for review."
