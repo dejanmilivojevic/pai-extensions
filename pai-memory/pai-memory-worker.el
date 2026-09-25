@@ -296,14 +296,21 @@ deferred-schema reveal round trip would only waste a turn -- and calling a
                                (funcall execute args ctx on-update on-done)))))))
           tools))
 
+(defun pai-memory-worker-reasoning (role)
+  "Return the thinking level worker ROLE runs with: its scoped role's level.
+A symbol, or nil for off (see `pai-scoped-thinking')."
+  (pai-scoped-thinking (plist-get (pai-memory-worker-role role) :model-role)))
+
 (cl-defun pai-memory-worker-launch (role &key system prompt tools cwd detail model
+                                         (reasoning nil reasoning-given)
                                          (timeout 300) (max-turns 20) on-done)
   "Launch a background memory worker for ROLE and return its activity entry.
 ROLE is a symbol from `pai-memory-worker-roles'.  SYSTEM is the system prompt
 text and PROMPT the user message.  TOOLS are executable tool plists (see
 `pai-memory-confined-tools' and `pai-memory-tool'); CWD is the run's working
 directory (default `default-directory').  DETAIL is the text shown after the
-metrics in the activity line.  MODEL overrides the role's scoped model.
+metrics in the activity line.  MODEL overrides the role's scoped model and
+REASONING (a level symbol, nil for off) its scoped thinking level.
 The run is aborted after TIMEOUT seconds and after MAX-TURNS turns.
 
 ON-DONE is called once, in the owning (current) buffer, with STATUS
@@ -311,6 +318,7 @@ ON-DONE is called once, in the owning (current) buffer, with STATUS
 MESSAGES and the activity ENTRY."
   (let* ((spec (pai-memory-worker-role role))
          (model (or model (pai-memory-worker--resolve-model role)))
+         (reasoning (if reasoning-given reasoning (pai-memory-worker-reasoning role)))
          (cwd (file-name-as-directory (expand-file-name (or cwd default-directory))))
          (owner-session (and (boundp 'pai--session) pai--session)))
     (unless model
@@ -322,7 +330,7 @@ MESSAGES and the activity ENTRY."
            (user (pai-user-message prompt))
            (tools (pai-memory-worker--prepare-tools entry tools)))
       (plist-put entry :data
-                 (list :role role :model model :cwd cwd :on-done on-done
+                 (list :role role :model model :reasoning reasoning :cwd cwd :on-done on-done
                        :owner-session owner-session
                        :initial-messages (list sys)
                        :run-id (format "%s-%s" (format-time-string "%Y%m%dT%H%M%S")
@@ -343,6 +351,7 @@ MESSAGES and the activity ENTRY."
                   (list user)
                   (pai-context (list sys) tools)
                   (list :model model
+                        :reasoning reasoning
                         :tool-execution 'sequential
                         :cwd cwd
                         :should-stop-after-turn

@@ -280,7 +280,8 @@ enable one or the other, not both.
 
 Observers use the `memory-observer` model role, which falls back to the task model
 and then the main model. Point it at a cheap model in `/menu` → Model & Reasoning →
-Scoped models, or with `/scoped-models memory-observer <id>`. To opt out, use `/memory session off` for one
+Scoped models, or with `/scoped-models memory-observer <id> [thinking level]`; every memory
+role also has a thinking level there (unset: inherited from `task`/`main`, else off). To opt out, use `/memory session off` for one
 session, or set the preset to `off` in `/menu` → Memory.
 
 | Command | Effect |

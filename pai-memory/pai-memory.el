@@ -304,8 +304,11 @@ NEW-TOKENS is how far the session digest grew since the last promotion."
 (defun pai-memory--role-model-text (role)
   "Return the model worker ROLE would use now, or why it cannot run."
   (condition-case err
-      (let ((m (pai-memory-worker-model role)))
-        (if m (pai-model-key m) "none"))
+      (let ((m (pai-memory-worker-model role))
+            (thinking (pai-memory-worker-reasoning role)))
+        (if m
+            (concat (pai-model-key m) (if thinking (format " (thinking %s)" thinking) ""))
+          "none"))
     (pai-memory-model-unavailable (format "UNAVAILABLE (%s)" (cadr err)))))
 
 (defun pai-memory-status-text ()

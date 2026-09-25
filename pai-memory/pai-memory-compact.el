@@ -243,13 +243,14 @@ verbatim and the strategy stays \"observational\"."
           :tokens-before (pai-estimate-context-tokens (plist-get plan :messages))
           :usage (and text-ok (plist-get gap-result :usage)))))
 
-(defun pai-memory-compact (messages session model &optional summarize-fn)
+(defun pai-memory-compact (messages session model &optional summarize-fn reasoning)
   "Compact live MESSAGES of SESSION from its observations; return a result or nil.
 The result has the shape `pai-ext-run-compact' expects.  MODEL summarizes
-the unobserved gap when observers lag, through SUMMARIZE-FN (called with
-messages and model; default: `pai-compaction-summarize-dropped', which
-follows pi and summarizes a split turn's prefix on its own).  Blocks while
-summarizing; see `pai-memory-compact-async'."
+the unobserved gap when observers lag, thinking at REASONING (a symbol,
+nil for off), through SUMMARIZE-FN (called with messages and model;
+default: `pai-compaction-summarize-dropped', which follows pi and
+summarizes a split turn's prefix on its own).  Blocks while summarizing;
+see `pai-memory-compact-async'."
   (let ((plan (pai-memory-compact--plan messages session model)))
     (when plan
       (pai-memory-compact--finish
@@ -259,14 +260,16 @@ summarizing; see `pai-memory-compact-async'."
              (funcall summarize-fn (plist-get plan :gap) model)
            (let (out)
              (pai-compaction-summarize-dropped (plist-get plan :gap) (plist-get plan :gap-kept)
-                                               model nil (lambda (r) (setq out r)) t)
+                                               model nil (lambda (r) (setq out r)) t nil
+                                               reasoning)
              out)))))))
 
-(defun pai-memory-compact-async (messages session model callback)
+(defun pai-memory-compact-async (messages session model callback &optional reasoning)
   "Compact like `pai-memory-compact' without blocking on the gap summary.
 Call CALLBACK once with the result, or nil when observational compaction
 does not apply (then before returning).  Return a function cancelling the
-gap summary, or nil when nothing is pending."
+gap summary, or nil when nothing is pending.  REASONING is the gap
+summary's thinking level (a symbol, nil for off)."
   (let ((plan (pai-memory-compact--plan messages session model)))
     (cond
      ((null plan) (funcall callback nil) nil)
@@ -281,7 +284,8 @@ gap summary, or nil when nothing is pending."
                     (condition-case err (pai-memory-compact--finish plan gap-result)
                       (error (message "pai-memory: observational compaction failed, using summary: %s"
                                       (error-message-string err))
-                             nil))))))))))
+                             nil)))))
+       nil nil reasoning)))))
 
 (defun pai-memory-compact-handler (event ctx)
   "The `compact' extension handler: observational compaction when possible.
@@ -296,7 +300,8 @@ observations can replace the older context yet."
       (condition-case err
           (let ((callback (plist-get event :callback)))
             (if (not callback)
-                (pai-memory-compact (plist-get event :messages) session (plist-get event :model))
+                (pai-memory-compact (plist-get event :messages) session (plist-get event :model)
+                                    nil (plist-get event :reasoning))
               ;; asynchronous caller (compaction mid-run): never block on the
               ;; gap summary
               (let* ((answered nil) (sync-result nil)
@@ -304,7 +309,8 @@ observations can replace the older context yet."
                               (plist-get event :messages) session (plist-get event :model)
                               (lambda (r)
                                 (if answered (funcall callback r)
-                                  (setq answered t sync-result r))))))
+                                  (setq answered t sync-result r)))
+                              (plist-get event :reasoning))))
                 (if answered
                     sync-result
                   (setq answered t)

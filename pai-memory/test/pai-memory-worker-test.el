@@ -174,6 +174,38 @@
           (accept-process-output nil 0.05)))
       (should (equal status "timeout")))))
 
+(ert-deftest pai-memory-worker-runs-at-the-role-thinking-level ()
+  "A worker's requests carry its scoped role's thinking level (off if unset)."
+  (let ((pai-model-roles (copy-sequence pai-model-roles))
+        (pai-model-role-fallbacks (copy-alist pai-model-role-fallbacks)))
+    (pai-memory-worker-register-model-roles)
+    (pai-memory-worker-test--with-owner buf dir
+      (let ((launch (lambda (role)
+                      (pai-faux-push '(:text "ok" :stop-reason stop))
+                      (setq pai-faux-last-options nil)
+                      (pai-memory-worker-launch
+                       role :system "s" :prompt "p" :model (pai-memory-worker-test--model))
+                      (plist-get pai-faux-last-options :reasoning))))
+        ;; nothing configured: no thinking, as before
+        (let ((pai-settings--global nil) (pai-settings--project nil))
+          (should-not (funcall launch 'observer)))
+        ;; the role's own level, and an inherited one
+        (let ((pai-settings--global '(:scoped-thinking (:memory-observer "minimal" :task "high")))
+              (pai-settings--project nil))
+          (should (eq (funcall launch 'observer) 'minimal))
+          (should (eq (funcall launch 'promoter) 'high))
+          (should (eq (pai-memory-worker-reasoning 'promoter) 'high))
+          ;; shown by /memory next to the model
+          (should (string-match-p "(thinking high)" (pai-memory--role-model-text 'promoter))))
+        ;; an explicit :reasoning wins, nil included
+        (let ((pai-settings--global '(:scoped-thinking (:memory-observer "high")))
+              (pai-settings--project nil))
+          (pai-faux-push '(:text "ok" :stop-reason stop))
+          (setq pai-faux-last-options nil)
+          (pai-memory-worker-launch 'observer :system "s" :prompt "p"
+                                    :model (pai-memory-worker-test--model) :reasoning nil)
+          (should-not (plist-get pai-faux-last-options :reasoning)))))))
+
 (ert-deftest pai-memory-worker-uses-role-model ()
   "Each role resolves through its scoped-model role, then :task, then :main."
   (let ((pai-model-roles (copy-sequence pai-model-roles))

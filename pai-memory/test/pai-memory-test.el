@@ -489,16 +489,19 @@
   (pai-memory-test--with-settings '(:session (:tail-tokens 100))
     (pai-memory-test--with-session s dir
       (let* ((e (pai-memory-test--turns s 6 300))
-             (emit nil) (got nil))
+             (emit nil) (got nil) (opts nil))
         (pai-memory-test--commit s "r1" (nth 0 e) (nth 1 e) "User asked for u0")
         (cl-letf (((symbol-function 'pai-provider-stream)
-                   (lambda (_m _c _o e) (setq emit e) nil)))
+                   (lambda (_m _c o e) (setq emit e opts o) nil)))
           (let ((ret (pai-memory-compact-handler
                       (list :messages (pai-memory-test--live s) :model 'model
+                            :reasoning 'low
                             :callback (lambda (r) (setq got r)))
                       (list :session s))))
             (should (plist-member ret :async))
             (should-not got)
+            ;; the gap summary thinks at the :compact role's level
+            (should (eq (plist-get opts :reasoning) 'low))
             ;; the gap summary streams in later (history, then a split
             ;; turn's prefix)
             (dotimes (_ 3)
