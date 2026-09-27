@@ -146,8 +146,9 @@ Both user and builtin entries are (NAME . PLIST); disabled roles are omitted."
   (cdr (assoc name (pai-isub-roles))))
 
 (defun pai-isub-role-names ()
-  "Return sorted role names."
-  (sort (mapcar #'car (pai-isub-roles)) #'string-lessp))
+  "Return sorted role names, each once (a user role overriding a builtin
+of the same name is listed once)."
+  (sort (delete-dups (mapcar #'car (pai-isub-roles))) #'string-lessp))
 
 ;;;; Role files
 
