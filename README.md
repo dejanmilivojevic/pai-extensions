@@ -477,6 +477,13 @@ terminated blocks of at least 400 tokens qualify; and a shaken result is marked
 so a second `/shake` will not re-elide its own placeholders. Both thresholds are
 editable under *Session → Context* in `/menu` (`:shake` project settings).
 
+**Shake before compacting.** With *Shake before compacting* set to `elide` or
+`all` (*Session → Context* in `/menu`, `:before-compact` in `:shake`), an
+automatic compaction -- before a prompt, between turns of a run, or after a
+context overflow -- first shakes the context in that mode. The compaction only
+runs if the context is still over the threshold; once shaking frees nothing
+more, every compaction goes ahead. `/compact` never shakes. Default: `off`.
+
 Like `/compact`, `/shake` reduces the live context that is sent to the model; the
 transcript on screen is a log of what happened and stays as it was.
 

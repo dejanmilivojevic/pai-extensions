@@ -596,48 +596,87 @@ Returns a result plist: `:messages' (the new list), `:mode', and the counts
 
 ;;;; Command
 
+(defun pai-shake--apply (mode)
+  "Shake the live context of the current pai buffer with MODE.
+When anything was dropped, the shaken context replaces the live one, is
+recorded in the session and announced to extensions.  Return the result
+plist (see `pai-shake-run'), or nil when there was no context."
+  (let ((messages pai--context-messages))
+    (when messages
+      (let ((result (pai-shake-run messages mode)))
+        (unless (= (pai-shake-dropped-count result) 0)
+          ;; The edits are recorded per session entry so the shaken
+          ;; context is rebuilt on /resume (`pai-session-context-pairs').
+          (let ((replacements (and pai--session
+                                   (pai-session-replacements
+                                    pai--session messages (plist-get result :messages)))))
+            (setq pai--context-messages (plist-get result :messages))
+            (pai--refresh-context-tokens)
+            (when pai--session
+              (pai-session-append
+               pai--session
+               (append
+                (list :type "shake"
+                      :mode (symbol-name mode)
+                      :toolResults (plist-get result :tool-results-dropped)
+                      :blocks (plist-get result :blocks-dropped)
+                      :images (plist-get result :images-dropped)
+                      :thinking (plist-get result :thinking-dropped)
+                      :tokensFreed (plist-get result :tokens-freed)
+                      :artifact (or (plist-get result :artifact) ""))
+                (when (consp replacements)
+                  (list :replacements (vconcat replacements)))))))
+          (pai-ext-emit 'session-shake (pai--ext-context) :mode mode :result result))
+        result))))
+
 (defun pai-shake--run-in-buffer (args)
   "Shake the live context of the current pai buffer according to ARGS.
 Renders a note with the outcome and returns nil (nothing left to display)."
   (let ((mode (pai-shake-parse-mode args)))
     (if (consp mode)
         (list :message (plist-get mode :error))
-      (let ((messages pai--context-messages))
-        (if (null messages)
-            (progn (pai--render-note "Nothing to shake.") nil)
-          (let ((result (pai-shake-run messages mode)))
-            (if (= (pai-shake-dropped-count result) 0)
-                (pai--render-note (pai-shake-format-summary result))
-              ;; The edits are recorded per session entry so the shaken
-              ;; context is rebuilt on /resume (`pai-session-context-pairs').
-              (let ((replacements (and pai--session
-                                       (pai-session-replacements
-                                        pai--session messages (plist-get result :messages)))))
-                (setq pai--context-messages (plist-get result :messages))
-                (pai--refresh-context-tokens)
-                (when pai--session
-                  (pai-session-append
-                   pai--session
-                   (append
-                    (list :type "shake"
-                          :mode (symbol-name mode)
-                          :toolResults (plist-get result :tool-results-dropped)
-                          :blocks (plist-get result :blocks-dropped)
-                          :images (plist-get result :images-dropped)
-                          :thinking (plist-get result :thinking-dropped)
-                          :tokensFreed (plist-get result :tokens-freed)
-                          :artifact (or (plist-get result :artifact) ""))
-                    (when (consp replacements)
-                      (list :replacements (vconcat replacements)))))))
-              (pai-ext-emit 'session-shake (pai--ext-context)
-                            :mode mode :result result)
-              ;; A run in flight keeps the context snapshot it started with;
-              ;; its turn is appended to the shaken list when it settles.
-              (pai--render-note
-               (concat (pai-shake-format-summary result)
-                       (when pai--active
-                         "\nThe active run keeps its snapshot; this applies from the next turn."))))
-            nil))))))
+      (let ((result (pai-shake--apply mode)))
+        (cond
+         ((null result) (pai--render-note "Nothing to shake."))
+         ((= (pai-shake-dropped-count result) 0)
+          (pai--render-note (pai-shake-format-summary result)))
+         ;; A run in flight keeps the context snapshot it started with;
+         ;; its turn is appended to the shaken list when it settles.
+         (t (pai--render-note
+             (concat (pai-shake-format-summary result)
+                     (when pai--active
+                       "\nThe active run keeps its snapshot; this applies from the next turn.")))))
+        nil))))
+
+;;;; Shaking before compaction
+
+(defconst pai-shake-before-compact-modes '("off" "elide" "all")
+  "Values of the `:before-compact' shake setting.")
+
+(defun pai-shake-before-compact-mode ()
+  "Return the mode to shake with before an automatic compaction, or nil.
+From the `:before-compact' entry of the `:shake' setting: \"elide\" or
+\"all\" (see `pai-shake-run'); \"off\" (the default) never shakes."
+  (let ((v (plist-get (pai-shake--settings) :before-compact)))
+    (and (member v '("elide" "all")) (intern v))))
+
+(defun pai-shake-before-compact (event ctx)
+  "The `pre-compact' handler: shake before an automatic compaction.
+With a `:before-compact' mode set, the live context of the pai buffer in
+CTX is shaken first; the compaction then only runs if that did not bring
+the context under the threshold -- once shaking frees nothing more, every
+compaction goes ahead.  Return non-nil when the context changed."
+  (let ((buf (plist-get ctx :buffer)))
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (let ((mode (pai-shake-before-compact-mode)))
+          (when mode
+            (let ((result (pai-shake--apply mode)))
+              (when (and result (> (pai-shake-dropped-count result) 0))
+                (pai--render-note
+                 (format "Shook the context before compacting (%s): %s"
+                         (plist-get event :reason) (pai-shake-format-summary result)))
+                t))))))))
 
 (defun pai-shake-command (args ctx)
   "Handler for `/shake': drop heavy content from the live context.
@@ -655,18 +694,31 @@ originating pai buffer."
 
 ;;;; Extension entry point
 
-(pai-register-extension
- (lambda (api)
-   (pai-ext-register-command
-    api "shake"
-    :description "Drop heavy content from context (tool results, large blocks)"
-    :arg-completions #'pai-shake--completions
-    :handler #'pai-shake-command))
- "shake")
+(defun pai-shake-extension (api)
+  "Register `/shake' and the shake-before-compaction handler with API."
+  (pai-ext-register-command
+   api "shake"
+   :description "Drop heavy content from context (tool results, large blocks)"
+   :arg-completions #'pai-shake--completions
+   :handler #'pai-shake-command)
+  (pai-ext-on api 'pre-compact #'pai-shake-before-compact))
+
+(pai-register-extension #'pai-shake-extension "shake")
 
 ;; Expose the knobs on the settings screen (`/menu') when it is available, so
 ;; every session can tune the protected tail and block threshold.
 (with-eval-after-load 'pai-settings-ui
+  (pai-settings-ui-register-item
+   'session 'context
+   :key :shake-before-compact :type 'choice :label "Shake before compacting"
+   :doc "Before an automatic compaction, first /shake (elide: large tool results and blocks; all: also images and thinking); compact only if the context is still too big"
+   :choices pai-shake-before-compact-modes
+   :get (lambda () (or (plist-get (pai-shake--settings) :before-compact) "off"))
+   :set (lambda (v)
+          (pai-settings-set :shake
+                            (plist-put (copy-sequence (pai-shake--settings))
+                                       :before-compact v)
+                            'project)))
   (pai-settings-ui-register-item
    'session 'context
    :key :shake-protect-tokens :type 'number :label "Shake: protect recent tokens"

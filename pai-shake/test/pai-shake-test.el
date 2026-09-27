@@ -414,5 +414,52 @@
     (let ((out (pai-shake-command "wobble" (list :buffer (current-buffer)))))
       (should (string-match-p "Unknown /shake mode" (plist-get out :message))))))
 
+;;;; Shaking before compaction
+
+(defmacro pai-shake-test--in-chat (buf &rest body)
+  "Run BODY in a fresh faux pai chat BUF, with a temp home and no settings."
+  (declare (indent 1))
+  `(let* ((dir (file-name-as-directory (make-temp-file "pai-shake-chat" t)))
+          (pai-directory (expand-file-name "home" dir))
+          (pai-default-model "faux")
+          (,buf (generate-new-buffer " *pai-shake-chat*")))
+     (unwind-protect
+         (with-current-buffer ,buf
+           (setq default-directory dir)
+           (pai--setup dir)
+           (setq-local pai-settings--global nil)
+           (setq-local pai-settings--project nil)
+           ,@body)
+       (kill-buffer ,buf)
+       (delete-directory dir t))))
+
+(ert-deftest pai-shake-before-compact-is-off-by-default ()
+  (pai-shake-test--in-chat buf
+    (setq pai--context-messages (append pai--context-messages (cdr (pai-shake-test--messages))))
+    (let ((before pai--context-messages))
+      (should-not (pai-shake-before-compact '(:reason auto) (list :buffer buf)))
+      (should (eq pai--context-messages before)))))
+
+(ert-deftest pai-shake-before-compact-shakes-the-live-context ()
+  (pai-shake-test--in-chat buf
+    (setq-local pai-settings--project '(:shake (:before-compact "elide" :protect-tokens 0)))
+    (setq pai--context-messages (append pai--context-messages (cdr (pai-shake-test--messages))))
+    (let ((tokens (pai-estimate-context-tokens pai--context-messages)))
+      (should (pai-shake-before-compact '(:reason auto) (list :buffer buf)))
+      (should (< (pai-estimate-context-tokens pai--context-messages) (/ tokens 2)))
+      (should (string-match-p "Shook the context before compacting (auto)" (buffer-string)))
+      ;; recorded like a /shake, so /resume rebuilds the shaken context
+      (should (seq-find (lambda (e) (equal (plist-get e :type) "shake"))
+                        (pai-session-entries pai--session)))
+      ;; once nothing is left to shake, the compaction goes ahead
+      (should-not (pai-shake-before-compact '(:reason auto) (list :buffer buf))))))
+
+(ert-deftest pai-shake-before-compact-registered-and-in-the-menu ()
+  (let ((pai--ext-handlers (make-hash-table :test 'eq)))
+    (pai-shake-extension (pai-ext-api-create :id "shake"))
+    (should (memq #'pai-shake-before-compact
+                  (mapcar #'cdr (gethash 'pre-compact pai--ext-handlers)))))
+  (should (equal pai-shake-before-compact-modes '("off" "elide" "all"))))
+
 (provide 'pai-shake-test)
 ;;; pai-shake-test.el ends here

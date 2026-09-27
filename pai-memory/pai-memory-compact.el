@@ -32,6 +32,7 @@
 (require 'pai-config)
 (require 'pai-session)
 (require 'pai-compaction)
+(require 'pai-activity)
 (require 'pai-memory-settings)
 (require 'pai-memory-ledger)
 
@@ -241,7 +242,14 @@ verbatim and the strategy stays \"observational\"."
           :strategy (if text-ok "observational+summary" "observational")
           :first-kept-entry-id first-kept
           :tokens-before (pai-estimate-context-tokens (plist-get plan :messages))
-          :usage (and text-ok (plist-get gap-result :usage)))))
+          :usage (and text-ok (plist-get gap-result :usage))
+          ;; a gap that could not be summarized stays verbatim: say why
+          :warning (and (plist-get plan :gap) (not text-ok)
+                        (format "The %s of recent, not yet observed messages could not be summarized (%s), so they are kept word for word."
+                                (format "~%s tokens"
+                                        (pai-activity-fmt-count
+                                         (pai-estimate-context-tokens (plist-get plan :gap))))
+                                (or (plist-get gap-result :error) "the summary came back empty"))))))
 
 (defun pai-memory-compact (messages session model &optional summarize-fn reasoning)
   "Compact live MESSAGES of SESSION from its observations; return a result or nil.

@@ -557,6 +557,23 @@
           (should (memq (pai-message-role (nth 1 (plist-get res :messages)))
                         '(user assistant))))))))
 
+(ert-deftest pai-memory-compact-says-when-the-gap-summary-failed ()
+  "A gap that could not be summarized is kept verbatim, with a warning."
+  (pai-memory-test--with-settings '(:session (:tail-tokens 100))
+    (pai-memory-test--with-session s dir
+      (let ((e (pai-memory-test--turns s 6 300)))
+        (pai-memory-test--commit s "r1" (nth 0 e) (nth 1 e) "User asked for u0")
+        (let ((res (pai-memory-compact (pai-memory-test--live s) s 'model
+                                       (lambda (_msgs _model)
+                                         (list :error "the request timed out")))))
+          (should (equal (plist-get res :strategy) "observational"))
+          (should (string-match-p "could not be summarized (the request timed out)"
+                                  (plist-get res :warning))))
+        ;; a successful gap summary has no warning
+        (should-not (plist-get (pai-memory-compact (pai-memory-test--live s) s 'model
+                                                   (lambda (_m _model) (list :text "gap")))
+                               :warning))))))
+
 (ert-deftest pai-memory-compact-async-handler-does-not-block ()
   "With a :callback the handler answers (:async CANCEL) and finishes later."
   (pai-memory-test--with-settings '(:session (:tail-tokens 100))
