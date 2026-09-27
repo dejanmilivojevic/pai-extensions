@@ -170,5 +170,25 @@ attribute list, so setting one changed both); the colours are the theme's."
       (cl-letf (((symbol-function 'pai-prompt-snippets--load) (lambda () (error "not reached"))))
         (should-not (pai-dashboard-snippets))))))
 
+(ert-deftest pai-dashboard-marks-extensions-shown-only-as-dependencies ()
+  "A disabled extension listed because another requires it says so; enabled ones don't."
+  (pai-ext-visible-test--with-exts dir pai-ext-visible-test--specs
+    (cl-letf (((symbol-function 'pai-dashboard--extension-dirs) (lambda () (list dir)))
+              ((symbol-function 'pai-dashboard-skills) (lambda () nil)))
+      (pai-ext-visible-test--disable "ext-b" "ext-c")
+      (with-temp-buffer
+        (let* ((rendered (pai-dashboard-render))
+               (text (substring-no-properties rendered))
+               (row (lambda (name)
+                      (seq-find (lambda (l) (string-match-p (concat "^ *" name " ") l))
+                                (split-string text "\n")))))
+          (should (string-match-p "(disabled · required by ext-a)" (funcall row "ext-b")))
+          (should (string-match-p "(disabled · required by ext-b)" (funcall row "ext-c")))
+          (should-not (string-match-p "required by" (funcall row "ext-a")))
+          (should-not (string-match-p "required by" (funcall row "ext-d")))
+          ;; in the muted face
+          (let ((pos (string-search "required by ext-a" rendered)))
+            (should (eq (get-text-property pos 'face rendered) 'pai-dashboard-muted))))))))
+
 (provide 'pai-dashboard-test)
 ;;; pai-dashboard-test.el ends here

@@ -333,6 +333,16 @@ the section shows EMPTY (a hint) instead."
      (pai-dashboard--center-block (pai-dashboard--lists skills extensions snippets column body-width) width)
      "\n")))
 
+(defun pai-dashboard--required-mark (name)
+  "Return why disabled extension NAME is listed, or \"\" when it is enabled.
+A disabled extension is shown only because enabled ones `require' it."
+  (let ((by (and (not (pai-ext-enabled-p name))
+                 (pai-ext-required-by name (pai-dashboard--extension-dirs)))))
+    (if by
+        (propertize (format "  (disabled · required by %s)" (string-join by ", "))
+                    'face 'pai-dashboard-muted)
+      "")))
+
 (defun pai-dashboard--lists (skills extensions snippets column body-width)
   "Return the Skills, Extensions and Prompt snippets sections, stacked."
   (concat
@@ -354,7 +364,8 @@ the section shows EMPTY (a hint) instead."
                (lambda () (pai-dashboard--open-in-dired (cadr e)))
                (format "Open %s in Dired"
                        (abbreviate-file-name (file-name-directory (cadr e)))))
-              "  " (propertize (cddr e) 'face 'pai-dashboard-muted))))
+              "  " (propertize (cddr e) 'face 'pai-dashboard-muted)
+              (pai-dashboard--required-mark (car e)))))
    (if snippets
        (concat "\n\n"
                (pai-dashboard--section
