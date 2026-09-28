@@ -133,13 +133,24 @@ its frontmatter and then the configured defaults.  Return VALUE."
 
 (defun pai-isub-roles ()
   "Return the role alist for this instance (user roles first).
-Both user and builtin entries are (NAME . PLIST); disabled roles are omitted."
+Both user and builtin entries are (NAME . PLIST); disabled roles are omitted,
+and a builtin shadowed by a role file is listed once, as the file's role."
   (let ((disabled (pai-isub-disabled-roles)))
     (cl-remove-if
      (lambda (r) (member (car r) disabled))
      (append pai-isub--roles
              (cl-loop for (name . rest) in pai-isub--builtins
+                      unless (assoc name pai-isub--roles)
                       collect (cons name (car rest)))))))
+
+(defun pai-isub-role-source (name)
+  "Return where role NAME comes from: builtin, user, project, or with \"↻builtin\".
+The suffix marks a role file that overrides the builtin of the same name."
+  (let ((file-role (assoc name pai-isub--roles)))
+    (if (null file-role)
+        (and (assoc name pai-isub--builtins) "builtin")
+      (concat (symbol-name (or (plist-get (cdr file-role) :source) 'user))
+              (if (assoc name pai-isub--builtins) "↻builtin" "")))))
 
 (defun pai-isub-role (name)
   "Return the role plist for NAME, or nil."
@@ -198,6 +209,9 @@ Project roles override home roles with the same name.  Return their count."
         (dolist (file (directory-files dir t "\\.md\\'"))
           (let ((role (pai-isub--parse-role-file file)))
             (when role
+              (setcdr role (append (cdr role)
+                                   (list :source (if (equal dir (car dirs)) 'user 'project)
+                                         :file file)))
               (setq roles (cons role (cl-remove (car role) roles
                                                 :key #'car :test #'equal))))))))
     (setq pai-isub--roles roles)

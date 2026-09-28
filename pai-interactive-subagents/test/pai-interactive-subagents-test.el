@@ -367,6 +367,31 @@
       (delete-directory dir t)
       (pai-isub-test--teardown buf))))
 
+(ert-deftest pai-isub-role-file-shadows-builtin-once ()
+  "A role file overriding a builtin is listed once and reports its source."
+  (let ((buf (pai-isub-test--setup))
+        (home (make-temp-file "pai-isub-home" t))
+        (proj (make-temp-file "pai-isub-proj" t)))
+    (unwind-protect
+        (with-current-buffer buf
+          (make-directory (expand-file-name "subagents" home) t)
+          (make-directory (expand-file-name ".pai/subagents" proj) t)
+          (with-temp-file (expand-file-name "subagents/worker.md" home)
+            (insert "---\nname: worker\ncontext: fresh\n---\nYou are worker."))
+          (with-temp-file (expand-file-name ".pai/subagents/checker.md" proj)
+            (insert "---\nname: checker\n---\nYou are checker."))
+          (let ((pai-directory home))
+            (pai-isub-load-roles proj))
+          (should (= 1 (cl-count "worker" (pai-isub-role-names) :test #'equal)))
+          (should (eq (pai-isub-role-context-mode "worker") 'fresh))
+          (should (equal (pai-isub-role-source "worker") "user↻builtin"))
+          (should (equal (pai-isub-role-source "checker") "project"))
+          (should (equal (pai-isub-role-source "scout") "builtin"))
+          (should-not (pai-isub-role-source "nonexistent")))
+      (delete-directory home t)
+      (delete-directory proj t)
+      (pai-isub-test--teardown buf))))
+
 (ert-deftest pai-isub-disabled-roles-disappear ()
   "A disabled builtin is no longer offered or launchable."
   (let ((buf (pai-isub-test--setup)))

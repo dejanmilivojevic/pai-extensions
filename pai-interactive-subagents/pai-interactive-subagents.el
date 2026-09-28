@@ -95,11 +95,13 @@
             (if (buffer-live-p buffer) (format " in buffer %s" (buffer-name buffer)) "")
             (plist-get entry :id))))
 
-(defun pai-isub--roles-text ()
-  "Return the role list as NAME: DESCRIPTION lines."
+(defun pai-isub--roles-text (&optional with-source)
+  "Return the role list as NAME: DESCRIPTION lines.
+WITH-SOURCE appends each role's origin (see `pai-isub-role-source')."
   (string-join
    (mapcar (lambda (pair)
-             (format "%s: %s" (car pair) (plist-get (cdr pair) :description)))
+             (format "%s: %s%s" (car pair) (plist-get (cdr pair) :description)
+                     (if with-source (format " [%s]" (pai-isub-role-source (car pair))) "")))
            (pai-isub-roles))
    "\n"))
 
@@ -280,7 +282,7 @@ the same name, so enable one or the other, not both.")
 
 (defun pai-isub-roles-command (_args _ctx)
   "Handler for `/subagents-roles': list roles with descriptions."
-  (list :message (pai-isub--roles-text)))
+  (list :message (pai-isub--roles-text t)))
 
 (defun pai-isub-reload-command (_args _ctx)
   "Handler for `/subagents-reload': re-read role files into this instance."
@@ -314,6 +316,7 @@ the same name, so enable one or the other, not both.")
              (delq nil
                    (list
                     (vui-box (vui-text role) :width 18 :align :left)
+                    (vui-box (vui-muted (pai-isub-role-source role)) :width 16 :align :left)
                     (vui-select
                      :value (pai-isub-role-model-display role)
                      :options (cons "inherit" (pai-model-keys))
