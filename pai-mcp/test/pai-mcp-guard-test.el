@@ -180,6 +180,20 @@
                          (buffer-string)))))
       (should (eq (plist-get result :is-error) :false)))))
 
+(ert-deftest pai-mcp-guard-binary-spill-suffix-follows-mime ()
+  "A spilled image gets its type's suffix so the read tool shows it."
+  (pai-mcp-guard-test--files
+    (let* ((large (base64-encode-string (make-string 600 ?x) t))
+           (text (lambda (mime)
+                   (pai-content-text
+                    (plist-get (pai-mcp-guard-result
+                                (list :content (list (list :type "image" :data large :mimeType mime)))
+                                nil '(:outputGuard (:maxBytes 256)))
+                               :content)))))
+      (should (string-match-p "saved to: [^]\n]+\\.jpg\\]" (funcall text "image/jpeg")))
+      (should (string-match-p "saved to: [^]\n]+\\.png\\]" (funcall text "IMAGE/PNG")))
+      (should (string-match-p "saved to: [^]\n]+\\.bin\\]" (funcall text "image/x-evil/../../x"))))))
+
 (ert-deftest pai-mcp-guard-tiny-budgets-disable-and-write-failure ()
   "Tiny text budgets remain hard limits; disabled guard and write errors are explicit."
   (pai-mcp-guard-test--files

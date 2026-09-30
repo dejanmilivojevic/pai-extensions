@@ -268,11 +268,22 @@ not incorporate server-supplied names, URIs, or MIME types."
       (format "[%s saved to: %s]" label path)
     (format "[%s could not be saved: %s]" label (plist-get saved :error))))
 
+(defconst pai-mcp-guard--binary-suffixes
+  '(("image/png" . ".png") ("image/jpeg" . ".jpg") ("image/jpg" . ".jpg")
+    ("image/gif" . ".gif") ("image/webp" . ".webp") ("image/bmp" . ".bmp")
+    ("application/pdf" . ".pdf") ("audio/wav" . ".wav") ("audio/mpeg" . ".mp3"))
+  "File suffixes for known MIME types of spilled binary blocks.
+A fixed table, so no server-supplied string reaches the path; other
+types get \".bin\".  The right suffix lets the read tool show images.")
+
 (defun pai-mcp-guard--binary (data mime)
   "Decode base64 DATA to a private file and return a reference for MIME."
   (condition-case err
       (pai-mcp-guard--reference
-       (pai-mcp-guard--save (base64-decode-string data) ".bin" t)
+       (pai-mcp-guard--save (base64-decode-string data)
+                            (or (cdr (assoc (downcase (or mime "")) pai-mcp-guard--binary-suffixes))
+                                ".bin")
+                            t)
        (format "Binary %s" (or mime "application/octet-stream")))
     (error (format "[Invalid binary content: %s]" (error-message-string err)))))
 
