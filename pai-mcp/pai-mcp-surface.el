@@ -528,7 +528,7 @@ is a hard deadline, default 30000.  ON-UPDATE receives emitted output."
            (cond
             ((and (listp value) (equal (plist-get value :type) "text")) (pai-text (plist-get value :text)))
             ((and (listp value) (equal (plist-get value :type) "image"))
-             (list :type 'image :data (plist-get value :data) :mime-type (plist-get value :mimeType)))
+             (pai-image (plist-get value :data) (plist-get value :mimeType)))
             (t (pai-text (if (stringp value) value (pai-json-encode value))))))
          (finish (error-code value)
            (unless finished
