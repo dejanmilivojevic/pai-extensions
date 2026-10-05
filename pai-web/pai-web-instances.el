@@ -50,6 +50,7 @@
 (declare-function pai--cost-text "pai-ui" ())
 (declare-function pai--mode-line "pai-ui" ())
 (declare-function pai--prompt-start "pai-ui" ())
+(declare-function pai-footer-position "pai-ui" ())
 (declare-function pai--tool-result-mode "pai-ui" (name args))
 (declare-function pai-model-key "pai-models" (model))
 (declare-function pai-session-name "pai-session" (session))
@@ -169,7 +170,11 @@ long session at once would stall Emacs.")
                                       (reverse pai--ext-statuses)))
            :usage (pai-web-propertized-html (or pai--usage-summary "") 2000)
            :above (pai-web--prompt-overlays-html)
-           :footer (pai-web-propertized-html (or (ignore-errors (pai--mode-line)) "") 4000)))))
+           ;; the footer is drawn above the prompt (and so part of :above)
+           ;; or in the mode line -- only the latter is sent on its own
+           :footer (if (eq (ignore-errors (pai-footer-position)) 'above-prompt)
+                       ""
+                     (pai-web-propertized-html (or (ignore-errors (pai--mode-line)) "") 4000))))))
 
 ;;;; Transcript log
 

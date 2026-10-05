@@ -365,6 +365,27 @@
       (should (member (plist-get info :id)
                       (mapcar (lambda (i) (plist-get i :id)) (pai-web-instance-list)))))))
 
+(ert-deftest pai-web-footer-is-shown-once ()
+  "The footer (memory, todo widgets) is sent once, wherever it is drawn."
+  (pai-web-test--with-chat buf
+    (with-current-buffer buf
+      (pai--set-widget "memory" "MEMWIDGET")
+      (let ((count (lambda ()
+                     (let ((c (pai-web-instance-chrome buf)) (n 0))
+                       (dolist (k '(:above :footer))
+                         (let ((s (plist-get c k)) (start 0))
+                           (while (string-match "MEMWIDGET" s start)
+                             (setq n (1+ n) start (match-end 0)))))
+                       n))))
+        (pai-settings-set :footer-position "above-prompt")
+        (pai--refresh-footer)
+        (should (= (funcall count) 1))
+        (should (string-match-p "MEMWIDGET" (plist-get (pai-web-instance-chrome buf) :above)))
+        (pai-settings-set :footer-position "mode-line")
+        (pai--refresh-footer)
+        (should (= (funcall count) 1))
+        (should (string-match-p "MEMWIDGET" (plist-get (pai-web-instance-chrome buf) :footer)))))))
+
 (ert-deftest pai-web-send-keeps-the-emacs-draft-and-attaches-images ()
   (pai-faux-reset)
   (pai-faux-push '(:text "seen" :stop-reason stop))
