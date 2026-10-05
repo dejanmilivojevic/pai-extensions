@@ -180,6 +180,7 @@ long session at once would stall Emacs.")
   (order nil)                           ; ids, newest first
   assistant                             ; id of the open assistant item
   stream                                ; open assistant blocks: list of [TYPE CHUNKS]
+  raw raw-text                          ; open item of raw inserts, its text
   (tools (make-hash-table :test 'equal))) ; tool-call id -> item id
 
 (defvar pai-web--logs (make-hash-table :test 'eq :weakness 'key)
@@ -223,6 +224,7 @@ long session at once would stall Emacs.")
 (defun pai-web--log-put (buffer log item &optional quiet)
   "Add ITEM to LOG of BUFFER; broadcast it unless QUIET.  Return its id."
   (let ((id (cl-incf (pai-web-log-next log))))
+    (setf (pai-web-log-raw log) nil (pai-web-log-raw-text log) nil)
     (setq item (plist-put item :id id))
     (puthash id item (pai-web-log-items log))
     (push id (pai-web-log-order log))
@@ -502,6 +504,35 @@ long session at once would stall Emacs.")
                                 (plist-put (copy-sequence final) :streaming :false))))
       (setf (pai-web-log-assistant log) nil))))
 
+(defvar pai-web--rendering nil
+  "Non-nil inside the chat buffer's render functions (logged on their own).")
+
+(defun pai-web--around-rendering (orig &rest args)
+  "Call ORIG with ARGS as a render function: its inserts are not raw."
+  (let ((pai-web--rendering t))
+    (apply orig args)))
+
+(defun pai-web--after-insert (text &optional face)
+  "Log TEXT (with FACE) inserted into the transcript by other code.
+Extensions write to the transcript with `pai--insert' too (/context's
+coloured panel, the dashboard); consecutive inserts make one note."
+  (when (and (pai-web--chat-p) (not pai-web--rendering) (stringp text))
+    (let* ((log (pai-web-log (current-buffer)))
+           (s (if face (propertize (substring-no-properties text) 'face face) text))
+           (id (pai-web-log-raw log))
+           (open (and id (eql id (car (pai-web-log-order log)))
+                      (gethash id (pai-web-log-items log)))))
+      (when (or open (not (string-blank-p s)))
+        (let* ((all (concat (if open (pai-web-log-raw-text log) "") s))
+               (shown (string-trim all "
++" "[ \t\n]+"))
+               (item (list :kind "note" :text (substring-no-properties shown)
+                           :html (pai-web-propertized-html shown 60000) :face "raw")))
+          (if open
+              (pai-web--log-replace (current-buffer) log id item)
+            (setq id (pai-web--log-put (current-buffer) log item)))
+          (setf (pai-web-log-raw log) id (pai-web-log-raw-text log) all))))))
+
 (defun pai-web--after-render-tool-start (event &rest _)
   "Log the tool call of EVENT."
   (when (pai-web--chat-p)
@@ -527,8 +558,15 @@ long session at once would stall Emacs.")
     (pai--insert-assistant-blocks :after pai-web--after-insert-assistant-blocks)
     (pai--finish-assistant :after pai-web--after-finish-assistant)
     (pai--render-tool-start :after pai-web--after-render-tool-start)
-    (pai--render-tool-end :after pai-web--after-render-tool-end))
+    (pai--render-tool-end :after pai-web--after-render-tool-end)
+    (pai--insert :after pai-web--after-insert))
   "The chat buffer's render functions and how they are advised.")
+
+(defconst pai-web--rendering-functions
+  '(pai--init-buffer pai--ensure-fresh-line pai--render-user pai--render-note
+    pai--open-assistant pai--handle-update pai--insert-assistant-blocks
+    pai--finish-assistant pai--render-tool-start pai--render-tool-end)
+  "Functions whose inserts are logged by their own advice, not as raw text.")
 
 (defun pai-web--safe (fn)
   "Return a function calling FN with its arguments, never signalling.
@@ -557,8 +595,11 @@ The chat buffer's rendering must not break because of the web view."
   (unless pai-web--installed
     (dolist (a pai-web--advice)
       (let ((fn (pai-web--advice-function (nth 2 a) (nth 1 a))))
-        (advice-add (nth 0 a) (nth 1 a) fn '((name . pai-web)))
-        (push (cons (nth 0 a) fn) pai-web--installed)))))
+        (advice-add (nth 0 a) (nth 1 a) fn)
+        (push (cons (nth 0 a) fn) pai-web--installed)))
+    (dolist (f pai-web--rendering-functions)
+      (advice-add f :around #'pai-web--around-rendering)
+      (push (cons f #'pai-web--around-rendering) pai-web--installed))))
 
 (defun pai-web-instances-uninstall ()
   "Remove the rendering advice and forget the logs."

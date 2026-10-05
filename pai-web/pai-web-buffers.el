@@ -139,15 +139,6 @@
     (sort out (lambda (a b) (or (< (car a) (car b))
                                 (and (= (car a) (car b)) (> (nth 1 a) (nth 1 b))))))))
 
-(defun pai-web--display-text (display text)
-  "Return what DISPLAY (a `display' property) shows instead of TEXT, or nil."
-  (cond
-   ((stringp display) display)
-   ((and (consp display) (eq (car display) 'image)) "[image]")
-   ((and (consp display) (eq (car display) 'space)) " ")
-   ((and (consp display) (stringp (car (last display)))) (car (last display)))
-   (t (ignore text) nil)))
-
 (defun pai-web-buffer-render (buffer)
   "Return BUFFER rendered for the browser (a plist for JSON)."
   (with-current-buffer buffer
@@ -163,6 +154,8 @@
              (strings (pai-web--overlay-strings beg end))
              (parts nil)
              (pos beg)
+             (col 0)
+             (last-display nil)
              (cursor-done nil))
         (while (< pos end)
           (while (and strings (<= (caar strings) pos))
@@ -171,9 +164,12 @@
                             (if strings (max (1+ pos) (caar strings)) end)))
                  (next (if (and (> pt pos) (< pt next)) pt next))
                  (display (get-char-property pos 'display)))
-            (unless (invisible-p pos)
+            (unless (or (invisible-p pos)
+                        ;; one `display' value shows once, however many
+                        ;; segments it spans
+                        (and display (eq display last-display)))
               (let* ((text (buffer-substring-no-properties pos next))
-                     (shown (or (and display (pai-web--display-text display text)) text))
+                     (seg (pai-web-segment-html text display col))
                      (face (pai-web--faces-at pos))
                      (style (if face (pai-web-face-style face) ""))
                      (act (pai-web--actionable pos)))
@@ -184,8 +180,10 @@
                               pos
                               (if act (format " class=\"%s\"" act) "")
                               (if (string-empty-p style) "" (format " style=\"%s\"" style))
-                              (pai-web-html-escape shown))
-                      parts)))
+                              (car seg))
+                      parts)
+                (setq col (cdr seg))))
+            (setq last-display display)
             (setq pos next)))
         (dolist (s strings) (push (nth 2 s) parts))
         (unless cursor-done (push "<span class=\"pt\"></span>" parts))

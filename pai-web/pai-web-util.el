@@ -16,6 +16,7 @@
 ;;; Code:
 
 (require 'cl-lib)
+(require 'seq)
 (require 'subr-x)
 (require 'color)
 
@@ -106,8 +107,9 @@ JSON null is nil and false is `:false'."
   "Map of face specs to their inline CSS (or \"\").")
 
 (defun pai-web-face-cache-clear ()
-  "Forget the cached face styles (after a theme change)."
-  (clrhash pai-web--face-cache))
+  "Forget the cached face styles and glyph widths (after a theme change)."
+  (clrhash pai-web--face-cache)
+  (when (boundp 'pai-web--glyph-cols) (clrhash pai-web--glyph-cols)))
 
 (defun pai-web--color (color)
   "Return COLOR (an Emacs colour name or #hex) as a CSS colour, or nil."
@@ -185,33 +187,117 @@ JSON null is nil and false is `:false'."
          (error ""))
        pai-web--face-cache)))
 
-(defun pai-web--span (text face)
-  "Return TEXT (unescaped) as HTML, wrapped in a span styled for FACE."
-  (let ((style (if face (pai-web-face-style face) "")))
-    (if (string-empty-p style)
-        (pai-web-html-escape text)
-      (concat "<span style=\"" style "\">" (pai-web-html-escape text) "</span>"))))
+(defvar pai-web--glyph-cols (make-hash-table :test 'eql)
+  "Map of character to the columns Emacs displays it in (see below).")
+
+(defconst pai-web--glyph-re "[\u2190-\u2bff\ue000-\uf8ff\U0001F000-\U0001FAFF]"
+  "Symbols, arrows, dingbats, emoji and icon-font characters.
+Browsers draw these with fallback fonts whose widths differ from the
+monospace cell (and from Emacs'), which breaks column layouts such as the
+/context grid; each is boxed to the width Emacs gives it.")
+
+(defun pai-web--glyph-width (char)
+  "Return the width CHAR takes in Emacs, in columns (may be fractional)."
+  (or (gethash char pai-web--glyph-cols)
+      (puthash char
+               (let ((cols (char-width char)))
+                 (or (and (display-graphic-p) (fboundp 'string-pixel-width)
+                          (> (frame-char-width) 0)
+                          (let ((px (ignore-errors (string-pixel-width (string char)))))
+                            (and (numberp px) (> px 0)
+                                 (/ (fround (* 10.0 (/ (float px) (frame-char-width)))) 10.0))))
+                     cols))
+               pai-web--glyph-cols)))
+
+(defun pai-web--col-after (text col)
+  "Return the column after TEXT when it starts at COL."
+  (let ((nl (string-search "\n" text)))
+    (if (not nl)
+        (+ col (string-width text))
+      (string-width (substring text (1+ (or (cl-position ?\n text :from-end t) nl)))))))
+
+(defun pai-web--text-html (text col)
+  "Return (HTML . COLUMN) for plain TEXT starting at column COL.
+Symbol glyphs are boxed to the width Emacs gives them (`pai-web--glyph-re')."
+  (let ((start 0) (parts nil))
+    (while (string-match pai-web--glyph-re text start)
+      (let* ((pos (match-beginning 0))
+             (before (substring text start pos))
+             (char (aref text pos))
+             (w (pai-web--glyph-width char)))
+        (push (pai-web-html-escape before) parts)
+        (setq col (pai-web--col-after before col))
+        (push (format "<span class=\"g\" style=\"display:inline-block;text-align:center;width:%gch\">%s</span>"
+                      w (pai-web-html-escape (string char)))
+              parts)
+        (setq col (+ col w) start (1+ pos))))
+    (let ((rest (substring text start)))
+      (push (pai-web-html-escape rest) parts)
+      (setq col (pai-web--col-after rest col)))
+    (cons (apply #'concat (nreverse parts)) col)))
+
+(defun pai-web--space-width (spec col)
+  "Return the width in columns of display SPEC (space ...) at column COL."
+  (let* ((props (cdr spec))
+         (fcw (max 1 (if (display-graphic-p) (frame-char-width) 1)))
+         (cols (lambda (v) (cond ((numberp v) v)
+                                 ((and (consp v) (numberp (car v))) (/ (float (car v)) fcw))))))
+    (cond
+     ((plist-get props :width) (funcall cols (plist-get props :width)))
+     ((plist-get props :align-to)
+      (let ((to (funcall cols (plist-get props :align-to))))
+        (and to (max 0 (- to col))))))))
+
+(defun pai-web--display-spec (display)
+  "Return what DISPLAY shows instead of the text: a string, a (space ...)
+spec, or nil to show the text itself."
+  (cond
+   ((stringp display) display)
+   ((memq (car-safe display) '(space)) display)
+   ((eq (car-safe display) 'image) "[image]")
+   ((and (consp display) (not (symbolp (car display))))   ; a list of specs
+    (seq-some #'pai-web--display-spec display))))
+
+(defun pai-web-segment-html (text display col)
+  "Return (HTML . COLUMN) for TEXT with `display' property DISPLAY at COL."
+  (let ((spec (and display (pai-web--display-spec display))))
+    (cond
+     ((stringp spec) (pai-web--text-html (substring-no-properties spec) col))
+     ((consp spec)
+      (let ((w (pai-web--space-width spec col)))
+        (if w
+            (cons (format "<span style=\"display:inline-block;width:%.2fch\"></span>" w) (+ col w))
+          (cons " " (1+ col)))))
+     (t (pai-web--text-html text col)))))
 
 (defun pai-web-propertized-html (string &optional max-chars)
   "Return STRING as HTML, its `face' and `font-lock-face' as inline CSS.
-Invisible text is left out.  With MAX-CHARS, only that many characters
-are converted and an ellipsis marks the cut."
+Invisible text is left out; `display' strings and spaces are honoured.
+With MAX-CHARS, only that many characters are converted and an ellipsis
+marks the cut."
   (let* ((string (or string ""))
          (len (length string))
          (end (if (and max-chars (> len max-chars)) max-chars len))
-         (pos 0)
+         (pos 0) (col 0)
          (parts nil))
     (while (< pos end)
       (let* ((next (min end
                         (next-single-property-change pos 'face string end)
                         (next-single-property-change pos 'font-lock-face string end)
-                        (next-single-property-change pos 'invisible string end)))
+                        (next-single-property-change pos 'invisible string end)
+                        (next-single-property-change pos 'display string end)))
              (next (if (> next pos) next (1+ pos))))
         (unless (get-text-property pos 'invisible string)
-          (push (pai-web--span (substring-no-properties string pos next)
-                               (or (get-text-property pos 'face string)
-                                   (get-text-property pos 'font-lock-face string)))
-                parts))
+          (let* ((face (or (get-text-property pos 'face string)
+                           (get-text-property pos 'font-lock-face string)))
+                 (style (if face (pai-web-face-style face) ""))
+                 (seg (pai-web-segment-html (substring-no-properties string pos next)
+                                            (get-text-property pos 'display string) col)))
+            (setq col (cdr seg))
+            (push (if (string-empty-p style)
+                      (car seg)
+                    (concat "<span style=\"" style "\">" (car seg) "</span>"))
+                  parts)))
         (setq pos next)))
     (when (< end len) (push "…" parts))
     (apply #'concat (nreverse parts))))

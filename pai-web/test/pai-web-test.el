@@ -119,6 +119,25 @@
   (should (equal (pai-web-propertized-html (concat "a" (propertize "hidden" 'invisible t) "b"))
                  "ab")))
 
+(ert-deftest pai-web-html-honours-display-and-glyph-widths ()
+  "Column layouts (the /context grid, aligned settings) survive in HTML."
+  ;; a display string replaces the text
+  (should (equal (pai-web-propertized-html (concat "a" (propertize "xyz" 'display "B") "c"))
+                 "aBc"))
+  ;; space specs become fixed-width boxes; :align-to counts from the column
+  (should (string-match-p "width:3\\.00ch"
+                          (pai-web-propertized-html (propertize " " 'display '(space :width 3)))))
+  (should (string-match-p "width:6\\.00ch"
+                          (pai-web-propertized-html
+                           (concat "abcd" (propertize " " 'display '(space :align-to 10))))))
+  ;; after a newline the column starts again
+  (should (string-match-p "width:8\\.00ch"
+                          (pai-web-propertized-html
+                           (concat "abcd\nxy" (propertize " " 'display '(space :align-to 10))))))
+  ;; symbol glyphs are boxed to their Emacs width
+  (should (string-match-p "<span class=\"g\" style=\"[^\"]*width:1ch\">⛁</span>"
+                          (pai-web-propertized-html "⛁ x"))))
+
 (ert-deftest pai-web-random-hex-has-the-asked-length ()
   (should (string-match-p "\\`[0-9a-f]\\{64\\}\\'" (pai-web-random-hex 32)))
   (should-not (equal (pai-web-random-hex 16) (pai-web-random-hex 16))))
@@ -291,6 +310,37 @@
       (should (string-match-p "3" (plist-get tool :result)))
       (should (string-match-p "(\\+ 1 2)" (plist-get tool :args)))
       (should (string-match-p "3" (plist-get (pai-web-tool-detail buf (plist-get tool :id)) :result))))))
+
+(ert-deftest pai-web-raw-transcript-inserts-become-notes ()
+  "Text extensions insert with `pai--insert' (not a note) reaches the page."
+  (pai-web-test--with-chat buf
+    (with-current-buffer buf
+      (pai--ensure-fresh-line)              ; a lone newline is no item
+      (pai--insert "\n")
+      (should (= (length (plist-get (pai-web-log-snapshot buf) :items)) 0))
+      (pai--insert (concat "Context " (propertize "used" 'face '(:foreground "#ff0000")) "\n"))
+      (pai--insert "second line\n")
+      (let ((items (append (plist-get (pai-web-log-snapshot buf) :items) nil)))
+        ;; consecutive inserts are one note, faces kept
+        (should (= (length items) 1))
+        (should (equal (plist-get (car items) :text) "Context used\nsecond line"))
+        (should (string-match-p "color:#ff0000\">used<" (plist-get (car items) :html))))
+      ;; a note in between starts a new one; rendered notes are not doubled
+      (pai--render-note "a note")
+      (pai--insert "third")
+      (should (equal (mapcar (lambda (i) (plist-get i :text))
+                             (plist-get (pai-web-log-snapshot buf) :items))
+                     '("Context used\nsecond line" "a note" "third"))))))
+
+(ert-deftest pai-web-shows-the-context-command ()
+  (require 'pai-context)
+  (pai-web-test--with-chat buf
+    (with-current-buffer buf
+      (should (null (pai-context-command "" (pai--ext-context)))))
+    (let ((items (append (plist-get (pai-web-log-snapshot buf) :items) nil)))
+      (should (= (length items) 1))
+      (should (string-match-p "System prompt\\|Messages\\|Tool" (plist-get (car items) :text)))
+      (should (string-match-p "style=" (plist-get (car items) :html))))))
 
 (ert-deftest pai-web-log-is-built-from-an-existing-context ()
   (pai-faux-reset)
