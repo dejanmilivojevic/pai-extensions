@@ -28,9 +28,11 @@ core README).
 | [`pai-prompt-snippets/`](pai-prompt-snippets/) | Mix-and-match prompt rules toggled per message |
 | [`pai-shake/`](pai-shake/) | Mechanical context reduction (`/shake`) |
 | [`pai-todo/`](pai-todo/) | A phased todo list the agent keeps while it works |
+| [`pai-web/`](pai-web/) | A web UI (phone first) to monitor and control every pai instance |
 | [`xwidget-browser/`](xwidget-browser/) | A real browser for the agent via xwidget-webkit |
 
-`pai-todo/` and `pai-prompt-snippets/` have their own, more detailed READMEs.
+`pai-todo/`, `pai-prompt-snippets/` and `pai-web/` have their own, more
+detailed READMEs.
 
 ## Installation
 

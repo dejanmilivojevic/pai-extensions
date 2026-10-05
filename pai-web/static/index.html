@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="theme-color" content="#1e1f22">
+<meta name="color-scheme" content="dark light">
+<title>pai</title>
+<link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+<link rel="manifest" href="/static/manifest.webmanifest">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div id="app">
+  <aside id="list-pane" class="pane">
+    <header class="bar">
+      <div class="bar-title"><span class="logo">pai</span><span id="conn" class="conn" title="connection"></span></div>
+      <button id="new-btn" class="icon-btn" title="New instance" aria-label="New instance">＋</button>
+      <button id="buffers-btn" class="icon-btn" title="Emacs buffers" aria-label="Emacs buffers">▤</button>
+      <button id="menu-btn" class="icon-btn" title="Settings" aria-label="Settings">⋯</button>
+    </header>
+    <div id="global-alerts"></div>
+    <div id="instances" class="scroll"></div>
+  </aside>
+  <main id="chat-pane" class="pane">
+    <header class="bar">
+      <button id="back-btn" class="icon-btn back" aria-label="Back to the list">‹</button>
+      <div class="bar-title chat-title">
+        <div id="chat-name" class="name"></div>
+        <div id="chat-sub" class="sub"></div>
+      </div>
+      <span id="chat-status" class="status-pill"></span>
+      <button id="chat-menu-btn" class="icon-btn" aria-label="Instance menu">⋯</button>
+    </header>
+    <div id="chips" class="chips"></div>
+    <div id="transcript" class="scroll transcript"></div>
+    <button id="jump-btn" class="jump hidden" aria-label="Jump to the end">↓</button>
+    <div id="chat-alerts"></div>
+    <div id="above" class="above"></div>
+    <div id="complete" class="complete hidden"></div>
+    <div id="attachments" class="attachments"></div>
+    <form id="composer" class="composer" autocomplete="off">
+      <button type="button" id="attach-btn" class="icon-btn" aria-label="Attach files">📎</button>
+      <textarea id="input" rows="1" placeholder="Message, /command or !shell" enterkeyhint="send"></textarea>
+      <button type="button" id="stop-btn" class="icon-btn stop hidden" aria-label="Interrupt">■</button>
+      <button type="submit" id="send-btn" class="icon-btn send" aria-label="Send">➤</button>
+      <input type="file" id="file-input" multiple hidden>
+    </form>
+    <div id="empty-chat" class="empty">Pick an instance</div>
+  </main>
+</div>
+<div id="sheet-backdrop" class="backdrop hidden"></div>
+<div id="sheet" class="sheet hidden" role="dialog" aria-modal="true"></div>
+<div id="buffer-view" class="buffer-view hidden"></div>
+<div id="login" class="login hidden">
+  <form id="login-form">
+    <div class="logo big">pai</div>
+    <input id="login-password" type="password" placeholder="Password" autocomplete="current-password" required>
+    <button type="submit">Log in</button>
+    <div id="login-error" class="error"></div>
+  </form>
+</div>
+<div id="toasts" class="toasts"></div>
+<script src="/static/net.js"></script>
+<script src="/static/md.js"></script>
+<script src="/static/ui.js"></script>
+<script src="/static/chat.js"></script>
+<script src="/static/sheets.js"></script>
+<script src="/static/buffer.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>
