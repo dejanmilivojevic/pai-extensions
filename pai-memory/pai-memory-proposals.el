@@ -392,7 +392,8 @@ created skill goes; EXTRA is a plist merged into the proposal."
            (user-error "Team memory is only used in trusted projects"))
          (when (and expires (not (pai-memory-valid-date-p expires)))
            (user-error "expires must be a date, YYYY-MM-DD"))
-         (when (and limit (> (length after) limit) (not (pai-memory-retrieval-mode-p)))
+         (when (and limit (> (length after) limit) (> (length after) (length before))
+                    (not (pai-memory-retrieval-mode-p)))
            (user-error "%s would grow to %d characters, over its %d limit; propose a memory-replace or memory-remove instead"
                        (file-name-nondirectory file) (length after) limit))
          (append base (list :target tgt :content (pai-memory--clean content) :old (or old "")

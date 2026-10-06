@@ -82,6 +82,29 @@
     (should (equal (pai-memory-read 'user default-directory) '("short entry")))
     (should (= (length (pai-memory-log-read)) 1))))
 
+(ert-deftest pai-memory-shrinking-change-allowed-over-limit ()
+  ;; a file already over its limit (limit lowered, or written under another
+  ;; project's larger limit) must still accept removes and shorter replaces
+  (pai-memory-stest--with-home dir
+    (setq pai-settings--global '(:memory (:long-term (:user-char-limit 200))))
+    (pai-memory-stest--apply :action 'add :target 'user :content (make-string 40 ?a))
+    (pai-memory-stest--apply :action 'add :target 'user :content (make-string 40 ?b))
+    (pai-memory-stest--apply :action 'add :target 'user :content (make-string 40 ?c))
+    (setq pai-settings--global '(:memory (:long-term (:user-char-limit 30))))
+    (should (plist-get (pai-memory-stest--apply :action 'remove :target 'user :old "aaaa") :ok))
+    (should (plist-get (pai-memory-stest--apply :action 'replace :target 'user :old "bbbb"
+                                                :content "short")
+                       :ok))
+    (should (equal (pai-memory-read 'user default-directory) (list "short" (make-string 40 ?c))))
+    ;; growing it is still refused
+    (should (plist-get (pai-memory-stest--apply :action 'add :target 'user :content "more") :error))
+    ;; and so is proposing growth, while proposing a remove works
+    (should-error (pai-memory-make-proposal :kind "memory-add" :target "user" :content "more"
+                                            :rationale "r" :cwd default-directory)
+                  :type 'user-error)
+    (should (pai-memory-make-proposal :kind "memory-remove" :target "user" :old "cccc"
+                                      :rationale "r" :cwd default-directory))))
+
 (ert-deftest pai-memory-limit-uses-project-settings-outside-pai-buffer ()
   ;; a worker/timer/review buffer has no project settings loaded; the limit
   ;; must still come from the project's .pai/settings.json, not the default

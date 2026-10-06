@@ -222,8 +222,10 @@ Return (:ok t :id ID :record R) or (:error MESSAGE)."
              (limit (pai-memory-target-limit target session cwd)))
         (when (and (eq target 'team) (not (pai-memory-team-allowed-p cwd)))
           (user-error "Team memory is only used in trusted projects"))
-        ;; in retrieval mode (V2 B3) the limit applies to the pinned entries
-        (when (and limit (> (length after) limit)
+        ;; in retrieval mode (V2 B3) the limit applies to the pinned entries;
+        ;; a change that does not grow the file (remove, shorter replace)
+        ;; is always allowed, so a file already over its limit can shrink
+        (when (and limit (> (length after) limit) (> (length after) (length before))
                    (not (and (fboundp 'pai-memory-retrieval-mode-p) (pai-memory-retrieval-mode-p session))))
           (user-error "%s would grow to %d characters, over its %d limit; replace or merge existing entries instead"
                       (file-name-nondirectory file) (length after) limit))
