@@ -621,6 +621,33 @@ Viewport size, screenshot width, console capture and the tool itself are
 configurable under *Browser* in `/menu` (`:browser` settings). Requires an
 Emacs built `--with-xwidgets` running on a graphical display.
 
+## Credits
+
+Many of these extensions are Emacs Lisp ports of, or were shaped by, other
+people's work. Thank you to the original authors. Where a row says *port*, the
+upstream project is the origin of the design and behaviour; the code here is a
+rewrite for Emacs and pai, and any bugs are ours.
+
+| Extension | Origin | Relationship |
+|-----------|--------|--------------|
+| `pai-ask-user/` | [amosblomqvist/pi-config](https://github.com/amosblomqvist/pi-config) (`extensions/ask-user-question.ts`) | Port; same tool contract, Emacs dialog instead of a pi-tui overlay |
+| `pai-prompt-snippets/` | [amosblomqvist/pi-config](https://github.com/amosblomqvist/pi-config) (`extensions/prompt-snippets`) | Port |
+| `pai-learn/` | [amosblomqvist/learn](https://github.com/amosblomqvist/learn) | Port (teach/visualize skills, quiz, log) |
+| `pai-memory/` | [amosblomqvist/pi-observational-memory](https://github.com/amosblomqvist/pi-observational-memory) | Session memory (observers, ledger, consolidator) is modelled on it |
+| `pai-memory/` | [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent) | Long-term learning loop, promoter, curator/merger and learning graph follow Hermes' ideas |
+| `pai-subagents/`, `pai-interactive-subagents/` | [nicobailon/pi-subagents](https://github.com/nicobailon/pi-subagents) | Port (`pai-interactive-subagents` is its successor) |
+| `pai-mcp/` | [nicobailon/pi-mcp-adapter](https://github.com/nicobailon/pi-mcp-adapter) | Port; one token-efficient proxy tool |
+| `pai-todo/` | [can1357/oh-my-pi](https://github.com/can1357/oh-my-pi) (`tools/todo.ts`) | Port of the todo tool and `/todo` |
+| `pai-shake/` | [can1357/oh-my-pi](https://github.com/can1357/oh-my-pi) (`compaction/shake.ts`) | Port of `/shake` |
+| `pai-context/` | [can1357/oh-my-pi](https://github.com/can1357/oh-my-pi) (`/context`) | Port of the idea and its categories |
+| `pai-dap/` | [can1357/oh-my-pi](https://github.com/can1357/oh-my-pi) (`tools/debug.ts`, `dap/client.ts`) | Port of the debug tool and DAP client |
+| `pai-lsp/` | [can1357/oh-my-pi](https://github.com/can1357/oh-my-pi) (`packages/coding-agent/src/lsp`) | The `lsp` tool's action set mirrors oh-my-pi's; the backends use Emacs' own Eglot / lsp-mode |
+| `pai-browser/` | [microsoft/playwright-mcp](https://github.com/microsoft/playwright-mcp), [ChromeDevTools/chrome-devtools-mcp](https://github.com/ChromeDevTools/chrome-devtools-mcp) | Not a port: a bridge that drives these MCP servers through `pai-mcp` |
+| `pai-dashboard/` | Spacemacs home buffer ([syl20bnr/spacemacs](https://github.com/syl20bnr/spacemacs)) | Inspiration only |
+| `pai-anthropic/`, `pai-openrouter/`, `pai-web/`, `xwidget-browser/` | none | Original to this project |
+
+pai itself is a port of [earendil-works/pi](https://github.com/earendil-works/pi).
+
 ## Development
 
 Each extension keeps its tests in its own `test/` subdirectory
