@@ -643,8 +643,7 @@ rewrite for Emacs and pai, and any bugs are ours.
 | `pai-dap/` | [can1357/oh-my-pi](https://github.com/can1357/oh-my-pi) (`tools/debug.ts`, `dap/client.ts`) | Port of the debug tool and DAP client |
 | `pai-lsp/` | [can1357/oh-my-pi](https://github.com/can1357/oh-my-pi) (`packages/coding-agent/src/lsp`) | The `lsp` tool's action set mirrors oh-my-pi's; the backends use Emacs' own Eglot / lsp-mode |
 | `pai-browser/` | [microsoft/playwright-mcp](https://github.com/microsoft/playwright-mcp), [ChromeDevTools/chrome-devtools-mcp](https://github.com/ChromeDevTools/chrome-devtools-mcp) | Not a port: a bridge that drives these MCP servers through `pai-mcp` |
-| `pai-dashboard/` | Spacemacs home buffer ([syl20bnr/spacemacs](https://github.com/syl20bnr/spacemacs)) | Inspiration only |
-| `pai-anthropic/`, `pai-openrouter/`, `pai-web/`, `xwidget-browser/` | none | Original to this project |
+| `pai-anthropic/`, `pai-openrouter/`, `pai-dashboard/`, `pai-web/`, `xwidget-browser/` | none | Original to this project |
 
 pai itself is a port of [earendil-works/pi](https://github.com/earendil-works/pi).
 
