@@ -42,7 +42,9 @@
   "Skills come from the skill directories with their descriptions."
   (pai-dashboard-test--with-home dir
     (cl-letf (((symbol-function 'pai--skill-dirs) (lambda () (list (expand-file-name "skills" dir)))))
-      (should (equal (pai-dashboard-skills) '(("greet" . "Say hello properly")))))))
+      (should (equal (pai-dashboard-skills)
+                     `(("greet" ,(expand-file-name "skills/greet/SKILL.md" dir)
+                        . "Say hello properly")))))))
 
 (ert-deftest pai-dashboard-render-sections ()
   "The rendering has the model line, both sections and the empty-skills hint."
@@ -67,8 +69,8 @@
       (should (string-match-p "and 2 more" text))))
   (should (equal (pai-dashboard--fit "pai-interactive-subagents" 10) "pai-inter…")))
 
-(ert-deftest pai-dashboard-skill-button-fills-prompt ()
-  "RET on a skill puts /skill:NAME in the prompt."
+(ert-deftest pai-dashboard-skill-button-opens-dired ()
+  "RET on a skill shows its directory in Dired, with point on SKILL.md."
   (pai-dashboard-test--with-home dir
     (let ((buf (generate-new-buffer "*pai-dash-test*")))
       (unwind-protect
@@ -82,8 +84,17 @@
                 (pai-dashboard-insert)
                 (goto-char (point-min))
                 (search-forward "greet")
-                (funcall (lookup-key (get-text-property (1- (point)) 'keymap) (kbd "RET")))
-                (should (equal (pai--input-text) "/skill:greet")))))
+                (save-window-excursion
+                  (funcall (lookup-key (get-text-property (1- (point)) 'keymap) (kbd "RET")))
+                  (with-current-buffer (window-buffer (selected-window))
+                    (should (derived-mode-p 'dired-mode))
+                    (should (equal (file-name-as-directory default-directory)
+                                   (expand-file-name "skills/greet/" dir)))
+                    (goto-char (window-point))
+                    (should (equal (dired-get-filename)
+                                   (expand-file-name "skills/greet/SKILL.md" dir)))
+                    (kill-buffer)))
+                (should (equal (pai--input-text) "")))))
         (let ((kill-buffer-query-functions nil)) (kill-buffer buf))))))
 
 (ert-deftest pai-dashboard-extension-opens-dired-snippet-opens-file ()

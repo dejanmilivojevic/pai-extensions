@@ -11,8 +11,8 @@
 ;;     sparkle; and
 ;;     a gradient wordmark), so it matches any theme.  Terminals and Emacsen
 ;;     without SVG get a text logo instead.
-;;   - Skills come from the session's skill directories; RET on one inserts
-;;     `/skill:NAME ' in the prompt.
+;;   - Skills come from the session's skill directories; RET on one opens
+;;     its directory in Dired, with point on its SKILL.md.
 ;;   - Extensions are listed from the extension directories, described by the
 ;;     summary line of their main file (the standard `;;; NAME --- SUMMARY'
 ;;     header, read with `lm-summary'); RET opens its directory in Dired.
@@ -194,9 +194,12 @@ one below, wired to them; an AI sparkle sits on the key's corner."
 ;;;; Contents
 
 (defun pai-dashboard-skills ()
-  "Return the skills of this session as (NAME . DESCRIPTION), sorted by name."
+  "Return the skills of this session as (NAME FILE . DESCRIPTION), sorted by name.
+FILE is the skill's SKILL.md."
   (let ((dirs (if (fboundp 'pai--skill-dirs) (pai--skill-dirs) (pai-skills-default-dirs))))
-    (sort (mapcar (lambda (s) (cons (plist-get s :name) (or (plist-get s :description) "")))
+    (sort (mapcar (lambda (s) (cons (plist-get s :name)
+                                    (cons (plist-get s :path)
+                                          (or (plist-get s :description) ""))))
                   (pai-discover-skills dirs))
           (lambda (a b) (string< (car a) (car b))))))
 
@@ -235,13 +238,6 @@ extensions are left out unless an enabled one requires them (see
               (pai-prompt-snippets--load)))))
 
 ;;;; Actions
-
-(defun pai-dashboard--put-in-prompt (text)
-  "Replace the prompt of the pai buffer at point with TEXT, and go there."
-  (let ((inhibit-read-only t))
-    (delete-region pai--input-marker (point-max))
-    (goto-char (point-max))
-    (insert text)))
 
 (defun pai-dashboard--open-in-dired (file)
   "Show FILE's directory in Dired in another window, with point on FILE."
@@ -326,7 +322,7 @@ the section shows EMPTY (a hint) instead."
       width)
      "\n"
      (pai-dashboard--center
-      (propertize "RET on an item to use it · /dashboard shows this again · /hotkeys for keys"
+      (propertize "RET on an item to open it · /dashboard shows this again · /hotkeys for keys"
                   'face 'pai-dashboard-muted)
       width)
      "\n\n"
@@ -351,9 +347,10 @@ A disabled extension is shown only because enabled ones `require' it."
     (lambda (s)
       (concat (pai-dashboard--button
                (pai-dashboard--fit (car s) column) 'pai-dashboard-name
-               (lambda () (pai-dashboard--put-in-prompt (format "/skill:%s " (car s))))
-               (format "Insert /skill:%s in the prompt" (car s)))
-              "  " (propertize (cdr s) 'face 'pai-dashboard-muted)))
+               (lambda () (pai-dashboard--open-in-dired (cadr s)))
+               (format "Open %s in Dired"
+                       (abbreviate-file-name (file-name-directory (cadr s)))))
+              "  " (propertize (cddr s) 'face 'pai-dashboard-muted)))
     "none yet -- teach one with /learn, or add one under ~/.pai/skills")
    "\n\n"
    (pai-dashboard--section
