@@ -44,6 +44,10 @@ session; off by default), port (8765), allowed host names, password, where
 attached files go (`~/.pai/web/uploads/DATE/` or a folder of the project).
 At most one server runs per Emacs.
 
+In the message box, **Ctrl+Enter** (Cmd+Enter on macOS) always sends.  On a
+desktop a plain Enter sends too and Shift+Enter starts a new line; on a
+touch device Enter starts a new line.
+
 **Without a password** the server listens on 127.0.0.1 only and needs no
 login. **With a password** (`/web password`, at least 8 characters, stored
 only as a salted hash) it listens on every interface and a browser logs in

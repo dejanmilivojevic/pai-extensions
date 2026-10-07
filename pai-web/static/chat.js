@@ -303,6 +303,11 @@ const Chat = (() => {
 
   input.addEventListener('input', () => { grow(); scheduleCompletion(); });
   input.addEventListener('keydown', e => {
+    // Ctrl+Enter (Cmd+Enter on macOS) always sends, also on touch devices
+    // where a plain Enter inserts a newline
+    if (e.key === 'Enter' && (e.ctrlKey || e.metaKey) && !e.isComposing) {
+      e.preventDefault(); hideCompletion(); send(); return;
+    }
     if (completion && !completion.box.classList.contains('hidden')) {
       const n = completion.items.length;
       if (e.key === 'ArrowDown') { e.preventDefault(); selectCompletion((completion.sel + 1) % n); return; }
