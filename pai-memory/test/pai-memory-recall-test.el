@@ -74,7 +74,9 @@
           ;; the stored message is untouched
           (should (equal (pai-message-content u1) "how did we run alembic for postgres"))
           ;; later requests: same text, no new search, no new entry
-          (let* ((u2 (pai-user-message "thanks, and the index?"))
+          ;; a distinct timestamp: both prompts can fall in the same millisecond
+          (let* ((u2 (pai-user-message "thanks, and the index?"
+                                       :timestamp (1+ (plist-get u1 :timestamp))))
                  (r2 (pai-memory-recall-apply (append msgs (list (pai-assistant-message) u2)) s t)))
             (should (equal (pai-message-content (nth 1 (car r2))) sent))
             (should-not (cdr r2)))
@@ -105,6 +107,36 @@
           (let ((sent (car (last (plist-get pai-faux-last-context :messages)))))
             (should (string-match-p "<memory-context>" (pai-content-text (pai-message-content sent)))))
           (should (string-match-p "🧠 recalled 1 from 1 session" (buffer-string)))
+          ;; the recalled notes are in the transcript, hidden until expanded
+          (goto-char (point-min))
+          (search-forward "alembic upgrade head")
+          (should (invisible-p (1- (point))))
+          (goto-char (point-min))
+          (search-forward "▸ 🧠 recalled")
+          (let ((b (button-at (match-beginning 0))))
+            (should b)
+            (button-activate b)
+            (goto-char (point-min))
+            (search-forward "alembic upgrade head")
+            (should-not (invisible-p (1- (point))))
+            (should (save-excursion (goto-char (point-min)) (search-forward "▾ 🧠 recalled" nil t)))
+            ;; the source link of the note is a button too
+            (should (save-excursion (goto-char (point-min))
+                                    (re-search-forward "· \\(session \\)" nil t)
+                                    (button-at (match-beginning 1))))
+            (button-activate (button-at (save-excursion (goto-char (point-min))
+                                                       (search-forward "▾ 🧠 recalled")
+                                                       (match-beginning 0))))
+            (goto-char (point-min))
+            (search-forward "alembic upgrade head")
+            (should (invisible-p (1- (point)))))
+          ;; /memory recall lists it with its prompt
+          (pai-memory--dispatch '("recall"))
+          (with-current-buffer "*pai-memory-recall*"
+            (should (string-match-p "how did we run alembic for postgres" (buffer-string)))
+            (should (string-match-p "1\\. observation .*session" (buffer-string)))
+            (should (string-match-p "alembic upgrade head" (buffer-string))))
+          (should (member "recall" pai-memory-subcommands))
           (let ((stored (seq-find #'pai-user-message-p (reverse pai--context-messages))))
             (should (equal (pai-message-content stored) "how did we run alembic for postgres")))
           (pai-memory-index-close))))))

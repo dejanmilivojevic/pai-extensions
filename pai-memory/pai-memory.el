@@ -503,6 +503,12 @@ so they cannot contradict it.  Turning off also stops every worker."
          (if (string-empty-p query) "Usage: /memory search WORDS"
            (pai-memory-index-update 2.0)
            (pai-memory-format-hits (pai-memory-search query :limit 10 :semantic t) query))))
+      ("recall"
+       (if (not session) "No session"
+         (let ((n (pai-memory-recall-show session)))
+           (format "Opened *pai-memory-recall* (%d recall%s)%s" n (if (= n 1) "" "s")
+                   (if (pai-memory-recall-enabled-p session) ""
+                     "; automatic recall is off (:memory :search :recall)")))))
       ("private"
        (if (not session) "No session"
          (pai-memory-set-private session (not (equal arg "off")))))
@@ -540,7 +546,7 @@ so they cannot contradict it.  Turning off also stops every worker."
                  ((equal (car words) "start") "Memory was not stopped; budget pause lifted for this session")
                  (t "Budget pause lifted for this session")))))
       (_ (concat "Usage: /memory [status | on | off | stop [ID|all] | start | observe | consolidate | compact | "
-                 "session on|off [--global] | learning on|off [--global] | preset NAME | resume | show | undo [ID] | promote | review | skills | curate | search WORDS | reindex | insights [DAYS] | private [on|off] | lint [SKILL] | merge | merge-topics | why QUOTE|SKILL | timeline [DAYS] | graph | reflect | forget TEXT [--regex] [--all] [--dry-run]]")))))
+                 "session on|off [--global] | learning on|off [--global] | preset NAME | resume | show | undo [ID] | promote | review | skills | curate | search WORDS | recall | reindex | insights [DAYS] | private [on|off] | lint [SKILL] | merge | merge-topics | why QUOTE|SKILL | timeline [DAYS] | graph | reflect | forget TEXT [--regex] [--all] [--dry-run]]")))))
 
 (defun pai-memory-command (args ctx)
   "Handle `/memory' with ARGS in the pai buffer from CTX."
@@ -578,7 +584,7 @@ so they cannot contradict it.  Turning off also stops every worker."
       "promote" "review" "skills"
       ("curate" "--consolidate")
       ("search" (:rest))
-      "reindex"
+      "recall" "reindex"
       ("insights" "7" "30" "90")
       ("private" "on" "off")
       ("forget" (:rest "--regex" "--all" "--dry-run"))
