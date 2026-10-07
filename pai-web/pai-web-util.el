@@ -72,6 +72,30 @@ JSON null is nil and false is `:false'."
   "Return VALUE as a JSON boolean."
   (if (and value (not (eq value :false))) t :false))
 
+;;;; Completion
+
+(defun pai-web-completions (string table pred &optional point)
+  "Complete STRING (POINT inside it, default its end) in TABLE with PRED.
+Matches like Emacs' minibuffer: the user's `completion-styles' and
+completion boundaries, so a file name only completes its last component.
+Return (BASE-SIZE . CANDIDATES): the candidates replace STRING from
+BASE-SIZE on (e.g. after the last `/' of a file name) and are sorted like
+the *Completions* buffer."
+  (let* ((point (min (or point (length string)) (length string)))
+         (md (ignore-errors (completion-metadata (substring string 0 point) table pred)))
+         (all (ignore-errors (completion-all-completions string table pred point md)))
+         (tail (last all))
+         (base (if (numberp (cdr-safe tail)) (cdr tail) 0)))
+    (when (consp tail) (setcdr tail nil))
+    (setq all (delete-dups (mapcar #'substring-no-properties all)))
+    (let ((sortfn (completion-metadata-get md 'display-sort-function))
+          (how (if (boundp 'completions-sort) completions-sort 'alphabetical)))
+      (setq all (cond (sortfn (funcall sortfn all))
+                      ((eq how 'alphabetical) (sort all #'string-lessp))
+                      ((functionp how) (funcall how all))
+                      (t all))))
+    (cons base all)))
+
 ;;;; Random tokens
 
 (defun pai-web-random-hex (bytes)

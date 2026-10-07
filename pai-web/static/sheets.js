@@ -43,23 +43,40 @@ const Sheets = (() => {
       if (p.kind === 'completion') {
         list = h('div', { class: 'list' });
         sheet.append(list);
-        let cands = p.candidates || [], seq = 0;
+        // a dynamic table (file names) completes the input after `base',
+        // as Emacs does: candidates are the last path component
+        let cands = p.candidates || [], base = p.base || '', seq = 0;
+        const pick = c => {
+          if (p.dynamic && /\/$/.test(c)) { field.value = base + c; refresh(); field.focus(); }
+          else answer(p.dynamic ? base + c : c);
+        };
         const show = () => {
           const q = p.dynamic ? '' : field.value;
           const shown = cands.filter(c => matches(c, q)).slice(0, 300);
-          list.replaceChildren(...shown.map(c => h('button', { onclick: () => {
-            if (p.dynamic && /\/$/.test(c)) { field.value = c; refresh(); field.focus(); }
-            else answer(c);
-          } }, c)));
+          list.replaceChildren(...shown.map(c => h('button', { onclick: () => pick(c) }, c)));
         };
         const refresh = async () => {
           if (!p.dynamic) { show(); return; }
           const my = ++seq;
           try {
             const r = await Net.post('/api/prompt-complete', { id: p.id, input: field.value });
-            if (my === seq) { cands = r.candidates || []; show(); }
+            if (my === seq) { cands = r.candidates || []; base = r.base || ''; show(); }
           } catch (_) { /* closed meanwhile */ }
         };
+        // TAB like the minibuffer: complete a sole match, else the common prefix
+        const tab = () => {
+          const shown = p.dynamic ? cands : cands.filter(c => matches(c, field.value));
+          if (!shown.length) { UI.toast('No match'); return; }
+          if (!p.dynamic) { if (shown.length === 1) field.value = shown[0]; return; }
+          let pre = shown[0];
+          for (const c of shown) { let i = 0; while (i < pre.length && i < c.length && pre[i] === c[i]) i++; pre = pre.slice(0, i); }
+          const tail = field.value.slice(base.length);
+          if (shown.length === 1 || pre.length > tail.length) {
+            field.value = base + (shown.length === 1 ? shown[0] : pre);
+            refresh();
+          }
+        };
+        field.addEventListener('keydown', e => { if (e.key === 'Tab') { e.preventDefault(); tab(); } });
         field.addEventListener('input', refresh);
         show();
       }

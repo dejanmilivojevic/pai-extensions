@@ -171,22 +171,28 @@ A plist (:kind KIND :caller BUFFER :origin BOOL :used BOOL ...).")
   (and (functionp table) (not (hash-table-p table)) (not (obarrayp table))))
 
 (defun pai-web--candidates (prompt input)
-  "Return up to the limit of PROMPT's completions of INPUT, or nil."
+  "Return PROMPT's completions of INPUT as (BASE . CANDIDATES), or nil.
+Matching follows Emacs (`pai-web-completions'): BASE is the part of INPUT
+the candidates do not replace, e.g. the directory of a file name."
   (let ((table (pai-web-prompt-table prompt))
-        (mb (pai-web-prompt-minibuffer prompt)))
+        (mb (pai-web-prompt-minibuffer prompt))
+        (input (or input "")))
     (when table
       (condition-case nil
-          (let ((all (if (buffer-live-p mb)
+          (let ((res (if (buffer-live-p mb)
                          (with-current-buffer mb
-                           (all-completions (or input "") table (pai-web-prompt-pred prompt)))
-                       (all-completions (or input "") table (pai-web-prompt-pred prompt)))))
-            (mapcar #'substring-no-properties (seq-take all pai-web-prompt-candidates-limit)))
+                           (pai-web-completions input table (pai-web-prompt-pred prompt)))
+                       (pai-web-completions input table (pai-web-prompt-pred prompt)))))
+            (cons (substring input 0 (min (car res) (length input)))
+                  (seq-take (cdr res) pai-web-prompt-candidates-limit)))
         (error nil)))))
 
 (defun pai-web-prompt-json (prompt)
   "Return PROMPT as a plist for JSON."
   (let* ((table (pai-web-prompt-table prompt))
-         (dynamic (pai-web--dynamic-table-p table)))
+         (dynamic (pai-web--dynamic-table-p table))
+         (cands (and table (pai-web--candidates
+                            prompt (if dynamic (pai-web-prompt-initial prompt) "")))))
     (list :id (pai-web-prompt-id prompt)
           :instance (let ((c (pai-web-prompt-caller prompt)))
                       (if (and (buffer-live-p c) (eq (buffer-local-value 'major-mode c) 'pai-mode))
@@ -203,10 +209,9 @@ A plist (:kind KIND :caller BUFFER :origin BOOL :used BOOL ...).")
                                       (not (eq (pai-web-prompt-require prompt) :false))))
           :dynamic (pai-web-bool dynamic)
           :origin (pai-web-bool (pai-web-prompt-origin prompt))
-          :candidates (if table
-                          (vconcat (pai-web--candidates
-                                    prompt (if dynamic (pai-web-prompt-initial prompt) "")))
-                        []))))
+          ;; candidates complete the input after BASE (a file name's directory)
+          :base (or (car cands) "")
+          :candidates (vconcat (cdr cands)))))
 
 (defun pai-web-prompts-json ()
   "Return the open prompts as a vector."
@@ -226,9 +231,11 @@ A plist (:kind KIND :caller BUFFER :origin BOOL :used BOOL ...).")
   (seq-find (lambda (p) (equal (pai-web-prompt-id p) id)) pai-web--prompts))
 
 (defun pai-web-prompt-complete (id input)
-  "Return the candidates of prompt ID for INPUT (for dynamic tables)."
-  (let ((p (pai-web-prompt id)))
-    (and p (vconcat (pai-web--candidates p input)))))
+  "Return the completions of prompt ID for INPUT (for dynamic tables).
+A plist (:base BASE :candidates [...]); see `pai-web--candidates'."
+  (let* ((p (pai-web-prompt id))
+         (res (and p (pai-web--candidates p input))))
+    (list :base (or (car res) "") :candidates (vconcat (cdr res)))))
 
 (defun pai-web--innermost-p (prompt)
   "Return non-nil when PROMPT's minibuffer is the innermost active one."

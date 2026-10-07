@@ -384,9 +384,8 @@ Nil sends none (e.g. for a test browser that injects scripts).")
                   (list :items [])))))
       ("/api/prompt-complete"
        (pai-web-bus-respond-json
-        req (list :candidates (or (pai-web-prompt-complete (plist-get body :id)
-                                                           (or (plist-get body :input) ""))
-                                  []))))
+        req (pai-web-prompt-complete (plist-get body :id)
+                                     (or (plist-get body :input) ""))))
       ("/api/upload"
        (let ((buf (pai-web--need-instance (pai-web--q req "i"))))
          (pai-web-bus-respond-json

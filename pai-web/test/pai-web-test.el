@@ -418,6 +418,42 @@
     ;; the user's own input is left as it was
     (should (equal (with-current-buffer buf (pai--input-text)) "draft"))))
 
+(ert-deftest pai-web-completes-file-names-like-emacs ()
+  (let ((dir (file-name-as-directory (make-temp-file "pai-web-files" t))))
+    (unwind-protect
+        (progn
+          (make-directory (expand-file-name "lisp/sub" dir) t)
+          (dolist (f '("lisp/pai-ui.el" "lisp/pai-util.el" "lisp/other.el" "top.el"))
+            (write-region "" nil (expand-file-name f dir)))
+          (pai-web-test--with-chat buf
+            (with-current-buffer buf (setq default-directory dir))
+            ;; only the last component is replaced, the directory stays
+            (let ((r (pai-web-complete buf "see @lisp/pai-u" 15)))
+              (should (equal (plist-get r :beg) 10))
+              (should (equal (plist-get r :end) 15))
+              (should (equal (mapcar (lambda (i) (plist-get i :v)) (plist-get r :items))
+                             '("pai-ui.el" "pai-util.el"))))
+            ;; completion styles apply (partial-completion here)
+            (let ((completion-styles '(basic partial-completion)))
+              (should (member "pai-util.el"
+                              (mapcar (lambda (i) (plist-get i :v))
+                                      (plist-get (pai-web-complete buf "@lisp/p-ut" 10) :items)))))
+            ;; directories are offered with their slash, to drill down
+            (should (member "sub/" (mapcar (lambda (i) (plist-get i :v))
+                                           (plist-get (pai-web-complete buf "@lisp/" 6) :items)))))
+          ;; a read-file-name prompt: candidates complete the input after its base
+          (let* ((p (pai-web-prompt--create :id "x" :table #'read-file-name-internal
+                                            :initial (concat dir "lisp/pai-u")))
+                 (default-directory dir)
+                 (pai-web--prompts (list p))
+                 (r (pai-web-prompt-complete "x" (concat dir "lisp/pai-u"))))
+            (should (equal (plist-get r :base) (concat dir "lisp/")))
+            (should (equal (plist-get r :candidates) ["pai-ui.el" "pai-util.el"]))
+            (let ((json (pai-web-prompt-json p)))
+              (should (equal (plist-get json :base) (concat dir "lisp/")))
+              (should (eq (plist-get json :dynamic) t)))))
+      (delete-directory dir t))))
+
 (ert-deftest pai-web-uploads-are-saved-safely ()
   (pai-web-test--with-chat buf
     (let ((r (pai-web-upload buf "../../etc/my file.txt" "data")))

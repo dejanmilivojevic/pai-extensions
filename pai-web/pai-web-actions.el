@@ -197,12 +197,15 @@ is the part of TEXT a candidate replaces, or nil."
                 (when r
                   (let* ((beg (nth 0 r)) (end (nth 1 r)) (table (nth 2 r))
                          (props (nthcdr 3 r))
-                         (prefix (buffer-substring-no-properties beg end))
+                         (string (buffer-substring-no-properties beg end))
                          (pred (plist-get props :predicate))
                          (annotate (plist-get props :annotation-function))
-                         (all (ignore-errors (all-completions prefix table pred)))
-                         (all (seq-take (sort (delete-dups (copy-sequence all)) #'string<)
-                                        pai-web-complete-limit)))
+                         ;; styles and boundaries as in Emacs: `@lisp/pai-u'
+                         ;; completes `pai-u' only, keeping `lisp/'
+                         (res (pai-web-completions string table pred
+                                                   (- (min (max (point) beg) end) beg)))
+                         (beg (+ beg (car res)))
+                         (all (seq-take (cdr res) pai-web-complete-limit)))
                     (when all
                       (list :beg (- beg start) :end (- end start)
                             :items (vconcat
