@@ -141,6 +141,32 @@
             (should (equal (pai-message-content stored) "how did we run alembic for postgres")))
           (pai-memory-index-close))))))
 
+(ert-deftest pai-memory-recall-note-expanded-option ()
+  "`:recall-expanded' shows the notes at once; the button still collapses them."
+  (pai-faux-reset)
+  (pai-memory-test--with-pai-buffer buf dir
+    (with-current-buffer buf
+      (let ((pai-settings--global '(:memory (:search (:recall t :recall-expanded t)))))
+        (cl-letf (((symbol-function 'pai-memory--skill-dirs) (lambda () nil)))
+          (pai-register-extension #'pai-memory-extension "memory")
+          (pai-memory-rec--past default-directory)
+          (pai-memory-index-update)
+          (pai-faux-push '(:text "We used alembic." :stop-reason stop))
+          (goto-char (point-max))
+          (insert "how did we run alembic for postgres")
+          (pai-send)
+          (goto-char (point-min))
+          (search-forward "alembic upgrade head")
+          (should-not (invisible-p (1- (point))))
+          (goto-char (point-min))
+          (search-forward "▾ 🧠 recalled")
+          (button-activate (button-at (match-beginning 0)))
+          (goto-char (point-min))
+          (search-forward "alembic upgrade head")
+          (should (invisible-p (1- (point))))
+          (should (save-excursion (goto-char (point-min)) (search-forward "▸ 🧠 recalled" nil t)))
+          (pai-memory-index-close))))))
+
 (ert-deftest pai-memory-recall-off-by-default ()
   (pai-memory-rec--with-home dir
     (setq pai-settings--global nil)

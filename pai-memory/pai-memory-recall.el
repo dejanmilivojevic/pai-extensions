@@ -186,7 +186,8 @@ where HITS are those of a new decision."
               (with-current-buffer buf
                 (pai-memory-recall-render-note
                  (pai-memory-recall-items
-                  hits (or (pai-memory-get :search :recall-chars session) 400)))))
+                  hits (or (pai-memory-get :search :recall-chars session) 400))
+                 (pai-truthy (pai-memory-get :search :recall-expanded session)))))
             (list :messages (car r)))
         (error (message "pai-memory: recall failed: %s" (error-message-string err)) nil)))))
 
@@ -237,14 +238,18 @@ where HITS are those of a new decision."
         (subst-char-in-region start (1+ start) ?▸ ?▾ t)
       (subst-char-in-region start (1+ start) ?▾ ?▸ t))))
 
-(defun pai-memory-recall-render-note (items)
-  "Insert the recall note for ITEMS in the transcript: a button that expands."
+(defun pai-memory-recall-render-note (items &optional expanded)
+  "Insert the recall note for ITEMS in the transcript: a button that toggles them.
+The notes start collapsed, or shown when EXPANDED."
   (let* ((sym (make-symbol "pai-recall"))
-         (header (make-text-button (concat "▸ " (pai-memory-recall-summary items)) nil
+         (header (make-text-button (concat (if expanded "▾ " "▸ ")
+                                           (pai-memory-recall-summary items)) nil
                                    'action #'pai-memory-recall--toggle 'pai-recall sym
                                    'follow-link t 'face 'pai-note-face
                                    'help-echo "RET or mouse-1: show/hide what was recalled")))
+    ;; a list spec, so only the symbols in it hide text (`t' hides all of it)
     (add-to-invisibility-spec sym)
+    (when expanded (remove-from-invisibility-spec sym))
     (pai--ensure-fresh-line)
     (pai--insert (concat "\n" header "\n"
                          (propertize

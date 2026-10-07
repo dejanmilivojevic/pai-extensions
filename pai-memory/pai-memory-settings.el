@@ -75,6 +75,7 @@
              :recall nil
              :recall-hits 3
              :recall-chars 400
+             :recall-expanded nil
              :embedder nil
              :embed-url nil
              :embed-model nil

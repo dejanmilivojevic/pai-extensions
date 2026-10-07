@@ -929,6 +929,8 @@ A blank number restores the built-in default."
                   (:recall boolean "Automatic recall" "Add related notes from earlier sessions to each prompt (no model call)")
                   (:recall-hits number "Recall hits" "How many notes automatic recall adds")
                   (:recall-chars number "Recall chars per hit" "Maximum length of each recalled note")
+                  (:recall-expanded boolean "Show recalled notes expanded"
+                   "Show the recalled notes under the transcript note right away (off: collapsed, RET/click expands)")
                   (:embedder string "Semantic search: embedder"
                    "Blank = off.  \"openai\" = any OpenAI-compatible /v1/embeddings endpoint (local servers too), or a name registered with pai-memory-register-embedder")
                   (:embed-url string "Embedding URL" "e.g. http://localhost:8080/v1/embeddings")
