@@ -304,11 +304,15 @@ Nil sends none (e.g. for a test browser that injects scripts).")
   "Return the chat buffer with ID or signal an error."
   (or (pai-web-instance id) (error "No such pai instance (it was closed?)")))
 
-(defun pai-web--need-buffer (id)
-  "Return the shown buffer with ID or signal an error."
+(defun pai-web--need-buffer (id &optional view)
+  "Return the buffer with ID a page may drive or signal an error.
+With VIEW, a buffer it may only look at will do."
   (let ((b (pai-web-buffer id)))
-    (unless (and b (pai-web-buffer-related-p b))
-      (error "That buffer cannot be shown here (closed?)"))
+    (unless (and b (if view (pai-web-buffer-viewable-p b) (pai-web-buffer-related-p b)))
+      (error (if (and b view) "That buffer cannot be shown here"
+               (if (and b (pai-web-buffer-viewable-p b))
+                   "That buffer is read-only here"
+                 "That buffer cannot be shown here (closed?)"))))
     b))
 
 (defun pai-web--state ()
@@ -353,10 +357,14 @@ Nil sends none (e.g. for a test browser that injects scripts).")
       ("/api/models"
        (pai-web-bus-respond-json req (pai-web-models (pai-web--need-instance (pai-web--q req "i")))))
       ("/api/dirs" (pai-web-bus-respond-json req (list :dirs (pai-web-known-dirs))))
-      ("/api/buffers" (pai-web-bus-respond-json req (list :list (pai-web-buffer-list))))
+      ("/api/buffers"
+       (pai-web-bus-respond-json
+        req (list :list (pai-web-buffer-list (equal (pai-web--q req "all") "1")))))
       ("/api/buffer"
-       (let ((buf (pai-web--need-buffer (pai-web--q req "b"))))
-         (pai-web-bus-respond-json req (pai-web-buffer-render buf))))
+       (let ((buf (pai-web--need-buffer (pai-web--q req "b") t))
+             (at (pai-web--q req "at")))
+         (pai-web-bus-respond-json
+          req (pai-web-buffer-render buf (and at (string-to-number at))))))
       ("/api/keykind"
        (let ((buf (pai-web--need-buffer (pai-web--q req "b"))))
          (pai-web-bus-respond-json

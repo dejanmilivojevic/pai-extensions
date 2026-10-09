@@ -224,13 +224,27 @@ const Sheets = (() => {
   }
 
   async function buffers() {
-    try { S.buffers = (await Net.get('/api/buffers')).list; } catch (_) { /* keep */ }
+    let all = S.buffers;
+    try { all = (await Net.get('/api/buffers', { all: 1 })).list; } catch (_) { /* keep */ }
     UI.openSheet('buffers', sheet => {
+      const filter = h('input', { type: 'search', placeholder: 'Filter buffers', autocapitalize: 'off',
+                                  autocomplete: 'off', spellcheck: 'false' });
+      const list = h('div', { class: 'list' });
+      const item = b => h('button', { onclick: () => { UI.closeSheet(true); Buffer.open(b.b); } },
+                          `${b.name}  ·  ${b.mode}`);
+      const render = () => {
+        const q = filter.value.trim().toLowerCase();
+        const hits = all.filter(b => !q || b.name.toLowerCase().includes(q) || b.mode.toLowerCase().includes(q));
+        const driven = hits.filter(b => !b.ro), viewed = hits.filter(b => b.ro);
+        list.replaceChildren(
+          ...(driven.length ? driven.map(item) : [h('div', { class: 'from' }, q ? 'No pai screen matches' : 'No pai screen open')]),
+          ...(viewed.length ? [h('div', { class: 'from section' }, 'Other Emacs buffers (view only)'), ...viewed.map(item)] : []));
+      };
+      filter.addEventListener('input', render);
+      render();
       sheet.append(h('h3', {}, 'Emacs buffers'),
-        h('div', { class: 'from' }, 'pai’s other screens and buffers opened from here'),
-        h('div', { class: 'list' }, ...(S.buffers.length ? S.buffers.map(b => h('button', {
-          onclick: () => { UI.closeSheet(true); Buffer.open(b.b); } }, `${b.name}  ·  ${b.mode}`))
-          : [h('div', { class: 'from' }, 'None open')])),
+        h('div', { class: 'from' }, 'pai’s screens and buffers opened from here can be driven; others are shown read-only'),
+        filter, list,
         h('div', { class: 'btns' }, h('button', { onclick: () => UI.closeSheet() }, 'Close')));
     });
   }

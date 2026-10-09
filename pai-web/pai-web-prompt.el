@@ -20,7 +20,8 @@
 ;; Cancel aborts the minibuffer like C-g.  When Emacs answers, the minibuffer's
 ;; exit hook takes the prompt off the page.
 ;;
-;; `completing-read', `read-from-minibuffer' (so `read-string'),
+;; `completing-read', `read-from-minibuffer', `read-string' (a primitive
+;; that reaches `read-from-minibuffer' from C, past its advice),
 ;; `y-or-n-p', `yes-or-no-p' and `read-passwd' are advised to describe the
 ;; prompt (its kind, completion table, default) for the setup hook.  A
 ;; forwarded completion uses the default minibuffer completion UI instead
@@ -54,7 +55,8 @@
 (declare-function pai-ask-user--other-answer "pai-ask-user" (text))
 
 (defvar pai-web--origin nil
-  "Non-nil while running an action a browser page asked for.")
+  "Non-nil while running an action a browser page asked for.
+The id of the page's client when known, else t.")
 
 (defvar pai-web-buffer-related-p-function nil
   "Function telling whether a buffer is shown in the browser (set by pai-web-buffers).")
@@ -106,6 +108,12 @@ A plist (:kind KIND :caller BUFFER :origin BOOL :used BOOL ...).")
 (defun pai-web--advise-read-from-minibuffer (orig &rest args)
   "Describe a `read-from-minibuffer' (ORIG with ARGS)."
   (pai-web--describe 'text (list :default (let ((d (nth 5 args))) (if (consp d) (car d) d)))
+                     orig args))
+
+(defun pai-web--advise-read-string (orig &rest args)
+  "Describe a `read-string' (ORIG with ARGS).
+It is a primitive calling `read-from-minibuffer' from C, past that advice."
+  (pai-web--describe 'text (list :default (let ((d (nth 3 args))) (if (consp d) (car d) d)))
                      orig args))
 
 (defun pai-web--advise-y-or-n-p (orig &rest args)
@@ -270,6 +278,7 @@ Return nil or an error message."
 (defconst pai-web--prompt-advice
   '((completing-read . pai-web--advise-completing-read)
     (read-from-minibuffer . pai-web--advise-read-from-minibuffer)
+    (read-string . pai-web--advise-read-string)
     (y-or-n-p . pai-web--advise-y-or-n-p)
     (yes-or-no-p . pai-web--advise-yes-or-no-p)
     (read-passwd . pai-web--advise-read-passwd))
