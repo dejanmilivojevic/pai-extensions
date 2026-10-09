@@ -54,7 +54,8 @@
 (declare-function pai-ask-user--other-answer "pai-ask-user" (text))
 
 (defvar pai-web--origin nil
-  "Non-nil while running an action a browser page asked for.")
+  "Non-nil while running an action a browser page asked for.
+The id of the page's client when known, else t.")
 
 (defvar pai-web-buffer-related-p-function nil
   "Function telling whether a buffer is shown in the browser (set by pai-web-buffers).")

@@ -31,7 +31,13 @@ does what a pai buffer does:
   fields, and use the key bar (RET, TAB, C-g, C-c C-c, q, n/p, arrows,
   sticky Ctrl/Meta for chords such as `C-c C-k`) or type: each key runs its
   binding as in Emacs. Only buffers a page action displayed and pai-related
-  buffers (a `pai-` mode, a `*...pai...*` or `*MCP...*` name) are shown.
+  buffers (a `pai-` mode, a `*...pai...*` or `*MCP...*` name) can be driven.
+  Running such a command again (a second `/menu`) opens the buffer again,
+  even while it is still open in Emacs.
+- **Other Emacs buffers**: the ▤ list (with a filter) also shows every other
+  buffer, view only: its text with faces, no keys or taps. Big buffers show
+  150,000 characters around point, with buttons for the text before and
+  after.
 
 ## Using it
 

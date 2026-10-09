@@ -11,10 +11,16 @@
 ;; letter inserts in an Org buffer and acts as a command in a dialog), and
 ;; an editable widget field takes a new value.
 ;;
-;; Shown are buffers opened by something a page asked for (the buffer is
-;; displayed while `pai-web--origin' is bound) and pai-related buffers (a
-;; `pai-' major mode, or a "*...pai...*" or "*MCP...*" name), but never
-;; other Emacs buffers.
+;; Driven this way are buffers opened by something a page asked for (the
+;; buffer is displayed while `pai-web--origin' is bound) and pai-related
+;; buffers (a `pai-' major mode, or a "*...pai...*" or "*MCP...*" name).
+;; Each time a page action displays such a buffer the page opens it again,
+;; so running /menu a second time shows the settings screen that is still
+;; open in Emacs.
+;;
+;; Every other Emacs buffer (but internal ones, minibuffers and pai chats,
+;; which have their own view) can be looked at read-only: it is rendered
+;; like the others but no key, tap or edit reaches it.
 
 ;;; Code:
 
@@ -50,10 +56,21 @@
 
 (setq pai-web-buffer-related-p-function #'pai-web-buffer-related-p)
 
-(defun pai-web-buffer-list ()
-  "Return the buffers the browser may show, as a vector of entries."
+(defun pai-web-buffer-viewable-p (buffer)
+  "Return non-nil when BUFFER may be looked at (read-only) in the browser.
+Any live buffer but internal ones (a name starting with a space),
+minibuffers and pai chats."
+  (and (buffer-live-p buffer)
+       (not (eq (buffer-local-value 'major-mode buffer) 'pai-mode))
+       (not (minibufferp buffer))
+       (not (string-prefix-p " " (buffer-name buffer)))))
+
+(defun pai-web-buffer-list (&optional all)
+  "Return the buffers the browser may drive, as a vector of entries.
+With ALL, every buffer it may look at, the read-only ones marked."
   (vconcat (mapcar #'pai-web-buffer-entry
-                   (seq-filter #'pai-web-buffer-related-p (buffer-list)))))
+                   (seq-filter (if all #'pai-web-buffer-viewable-p #'pai-web-buffer-related-p)
+                               (buffer-list)))))
 
 (defun pai-web--mode-name (buffer)
   "Return BUFFER's mode name as shown in its mode line."
@@ -68,17 +85,19 @@
   "Return the list entry of BUFFER."
   (list :b (pai-web-id buffer) :name (buffer-name buffer)
         :mode (pai-web--mode-name buffer)
-        :opened (pai-web-bool (gethash buffer pai-web--opened))))
+        :opened (pai-web-bool (gethash buffer pai-web--opened))
+        :ro (pai-web-bool (not (pai-web-buffer-related-p buffer)))))
 
 (defun pai-web--note-displayed (buffer)
-  "Remember BUFFER when an action of a page displayed it; tell the pages."
-  (when (and pai-web--origin (buffer-live-p buffer)
-             (not (eq (buffer-local-value 'major-mode buffer) 'pai-mode))
-             (not (minibufferp buffer))
-             (not (string-prefix-p " " (buffer-name buffer))))
-    (unless (gethash buffer pai-web--opened)
-      (puthash buffer t pai-web--opened)
-      (pai-web-bus-broadcast (list :t "opened" :buffer (pai-web-buffer-entry buffer))))))
+  "Remember BUFFER when an action of a page displayed it; tell the page.
+Every time, not only the first: a buffer still open in Emacs (the
+settings screen of an earlier /menu) is opened again in the page."
+  (when (and pai-web--origin (pai-web-buffer-viewable-p buffer))
+    (puthash buffer t pai-web--opened)
+    (let ((client pai-web--origin))
+      (pai-web-bus-broadcast (list :t "opened" :buffer (pai-web-buffer-entry buffer))
+                             (and (stringp client)
+                                  (lambda (c) (equal (pai-web-client-id c) client)))))))
 
 (defun pai-web--advise-display-buffer (orig buffer-or-name &rest args)
   "Call ORIG (`display-buffer') with BUFFER-OR-NAME and ARGS; note the buffer."
@@ -139,18 +158,23 @@
     (sort out (lambda (a b) (or (< (car a) (car b))
                                 (and (= (car a) (car b)) (> (nth 1 a) (nth 1 b))))))))
 
-(defun pai-web-buffer-render (buffer)
-  "Return BUFFER rendered for the browser (a plist for JSON)."
+(defun pai-web-buffer-render (buffer &optional around)
+  "Return BUFFER rendered for the browser (a plist for JSON).
+The text shown surrounds point, or position AROUND when given."
   (with-current-buffer buffer
     (save-restriction
       (widen)
       (let* ((win (get-buffer-window buffer t))
              (pt (if win (window-point win) (point)))
+             (center (if (integerp around) (max (point-min) (min (point-max) around)) pt))
              (half (/ pai-web-buffer-render-chars 2))
-             (beg (save-excursion (goto-char (max (point-min) (- pt half)))
+             (beg (save-excursion (goto-char (max (point-min) (- center half)))
                                   (line-beginning-position)))
              (end (save-excursion (goto-char (min (point-max) (+ beg pai-web-buffer-render-chars)))
                                   (line-end-position)))
+             (_ (when (bound-and-true-p jit-lock-mode)
+                  ;; a buffer no window shows may not be fontified yet
+                  (ignore-errors (jit-lock-fontify-now beg end))))
              (strings (pai-web--overlay-strings beg end))
              (parts nil)
              (pos beg)
@@ -191,6 +215,7 @@
               :mode (pai-web--mode-name buffer)
               :point pt :beg beg :end end :size (buffer-size)
               :readonly (pai-web-bool buffer-read-only)
+              :ro (pai-web-bool (not (pai-web-buffer-related-p buffer)))
               :colors (pai-web-default-colors)
               :html (apply #'concat (nreverse parts)))))))
 

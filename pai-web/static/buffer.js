@@ -1,10 +1,12 @@
 // A remote Emacs buffer: live text with faces, taps on buttons/fields/text,
 // a key bar (with sticky Ctrl/Meta and prefix keys like C-c) and typing.
+// Buffers that are not pai's are shown read-only: text only, no keys.
 'use strict';
 
 const Buffer = (() => {
   const view = $('#buffer-view');
   let seq = [], ctrl = false, meta = false, refreshTimer = null, loading = false, again = false;
+  let ro = false, at = null;   // read-only view; position the text is rendered around (null: point)
   const KEYS = ['RET', 'TAB', 'S-TAB', 'C-g', 'C-c C-c', 'C-c C-k', 'q', 'n', 'p', 'SPC', 'DEL',
                 '<up>', '<down>', '<left>', '<right>', 'C-a', 'C-e', 'M-<', 'M->', 'g', 'o', '?'];
 
@@ -27,11 +29,30 @@ const Buffer = (() => {
         h('button', { class: 'icon-btn', 'aria-label': 'Close', onclick: close }, '‹'),
         h('div', { class: 'bar-title chat-title' }, h('div', { class: 'name' }), h('div', { class: 'sub' })),
         h('button', { class: 'icon-btn', title: 'Refresh', onclick: refresh }, '⟳'),
-        h('button', { class: 'icon-btn', title: 'Kill buffer', onclick: () => Sheets.confirm('Kill this buffer in Emacs?', () => {
+        h('button', { class: 'icon-btn kill', title: 'Kill buffer', onclick: () => Sheets.confirm('Kill this buffer in Emacs?', () => {
           App.act({ a: 'kill-buffer', b: S.buffer }); close();
         }) }, '🗑')),
-      pre, h('div', { class: 'keyseq' }), keys,
+      h('button', { class: 'buf-more before hidden', onclick: () => more(-1) }, '▲ Earlier text'),
+      pre,
+      h('button', { class: 'buf-more after hidden', onclick: () => more(1) }, '▼ Later text'),
+      h('div', { class: 'keyseq' }), keys,
       h('div', { class: 'buf-input' }, text, h('button', { onclick: sendText }, '⏎')));
+  }
+
+  // Show the text before or after what is rendered (big buffers).
+  let shown = null;
+  function more(dir) {
+    if (!shown) return;
+    at = dir < 0 ? Math.max(1, shown.beg - 1) : shown.end + 1;
+    delete view.querySelector('pre.buf').dataset.b;   // scroll to the new text
+    refresh(dir);
+  }
+
+  function setRo(value) {
+    ro = value;
+    view.classList.toggle('ro', ro);
+    for (const sel of ['.keys', '.keyseq', '.buf-input', '.kill'])
+      view.querySelector(sel).classList.toggle('hidden', ro);
   }
 
   function mods() {
@@ -82,6 +103,7 @@ const Buffer = (() => {
   }
 
   async function onTap(e) {
+    if (ro) return;
     const hit = posAt(e);
     if (!hit) return;
     const cls = hit.span.className;
@@ -108,17 +130,21 @@ const Buffer = (() => {
 
   function soon() { clearTimeout(refreshTimer); refreshTimer = setTimeout(refresh, 150); }
 
-  async function refresh() {
+  async function refresh(dir) {
     if (!S.buffer) return;
     if (loading) { again = true; return; }
     loading = true;
     try {
-      const r = await Net.get('/api/buffer', { b: S.buffer });
+      const r = await Net.get('/api/buffer', at === null ? { b: S.buffer } : { b: S.buffer, at });
       const pre = view.querySelector('pre.buf');
+      shown = r;
+      setRo(!!r.ro);
+      view.querySelector('.buf-more.before').classList.toggle('hidden', r.beg <= 1);
+      view.querySelector('.buf-more.after').classList.toggle('hidden', r.end >= r.size + 1);
       const atEnd = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 40;
       const top = pre.scrollTop;
       view.querySelector('.name').textContent = r.name;
-      view.querySelector('.sub').textContent = r.mode + (r.readonly ? ' · read-only' : '');
+      view.querySelector('.sub').textContent = r.mode + (r.ro ? ' · view only' : r.readonly ? ' · read-only' : '');
       if (r.colors) { pre.style.background = r.colors.bg || ''; pre.style.color = r.colors.fg || ''; }
       pre.innerHTML = r.html;
       if (atEnd && r.point >= r.size) pre.scrollTop = pre.scrollHeight;
@@ -126,7 +152,9 @@ const Buffer = (() => {
       if (pre.dataset.b !== r.b) {
         pre.dataset.b = r.b;
         const pt = pre.querySelector('.pt');
-        if (pt) pt.scrollIntoView({ block: 'center' });
+        if (dir < 0) pre.scrollTop = pre.scrollHeight;
+        else if (dir > 0) pre.scrollTop = 0;
+        else if (pt) pt.scrollIntoView({ block: 'center' });
       }
     } catch (e) {
       UI.toast(e.message, 'error');
@@ -141,7 +169,7 @@ const Buffer = (() => {
     if (!view.firstChild) build();
     if (S.buffer !== b) { view.querySelector('pre.buf').innerHTML = ''; delete view.querySelector('pre.buf').dataset.b; }
     S.buffer = b;
-    seq = []; ctrl = meta = false; mods();
+    seq = []; ctrl = meta = false; at = null; shown = null; mods();
     view.classList.remove('hidden');
     App.sendView();
     refresh();

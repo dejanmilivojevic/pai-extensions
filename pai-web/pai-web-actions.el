@@ -111,7 +111,7 @@ returned by THUNK is shown to CLIENT as an error."
   (setq pai-web--queue
         (append pai-web--queue
                 (list (lambda ()
-                        (let ((pai-web--origin t))
+                        (let ((pai-web--origin (or client t)))
                           (condition-case err
                               (let ((result (if buffer
                                                 (if (buffer-live-p buffer)

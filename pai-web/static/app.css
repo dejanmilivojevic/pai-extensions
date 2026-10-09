@@ -183,6 +183,8 @@ pre.code, .tool pre { background: var(--code-bg); color: var(--code-fg); padding
 .buffer-view pre.buf .field { background: #ffffff14; outline: 1px dashed #fff4; cursor: text; }
 .buffer-view pre.buf .pt { display: inline-block; width: 2px; height: 1.1em; vertical-align: text-bottom; background: var(--accent);
   margin: 0 -1px; animation: pulse 1s infinite; }
+.buffer-view .buf-more { border: none; border-radius: 0; background: var(--bg2); color: var(--fg2); font-size: 12px; padding: 6px; }
+.sheet .from.section { padding: 12px 6px 4px; font-weight: 700; }
 .keys { display: flex; gap: 5px; padding: 6px 8px; overflow-x: auto; border-top: 1px solid var(--line); background: var(--bg2); scrollbar-width: none; }
 .keys button { flex: none; font-family: var(--mono); font-size: 13px; padding: 7px 10px; }
 .keys button.on { background: var(--accent); color: #fff; border-color: var(--accent); }

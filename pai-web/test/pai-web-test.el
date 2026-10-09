@@ -622,6 +622,65 @@
         (should (= (point) 3))
         (should-not (equal sig (pai-web-buffer-signature buf)))))))
 
+;; Bug: a second /menu from the page showed nothing because the settings
+;; buffer, still open in Emacs, was only announced the first time.
+(ert-deftest pai-web-displayed-buffer-is-opened-every-time ()
+  (pai-web-test--with-state
+    (pai-web-test--with-remote buf
+      (let* ((client (pai-web-bus-new-client 'open))
+             (other (pai-web-bus-new-client 'open))
+             (opened (lambda (c)
+                       (seq-count (lambda (e) (equal (plist-get e :t) "opened"))
+                                  (pai-web-test--events c)))))
+        (dotimes (_ 2)
+          (let ((pai-web--origin (pai-web-client-id client)))
+            (pai-web--note-displayed buf)))
+        (should (= (funcall opened client) 2))
+        ;; only the page that asked opens it
+        (should (= (funcall opened other) 0))
+        ;; displayed from Emacs: no page opens it
+        (pai-web--note-displayed buf)
+        (should (= (funcall opened client) 2))))))
+
+(ert-deftest pai-web-other-buffers-are-view-only ()
+  (pai-web-test--with-state
+    (let ((other (generate-new-buffer "plain notes")))
+      (unwind-protect
+          (let ((id (pai-web-id other)))
+            (with-current-buffer other (insert "hello there"))
+            (should (pai-web-buffer-viewable-p other))
+            (should-not (pai-web-buffer-related-p other))
+            (should-not (pai-web-buffer-viewable-p (get-buffer-create " *internal*")))
+            (should-not (seq-find (lambda (e) (equal (plist-get e :b) id)) (pai-web-buffer-list)))
+            (let ((entry (seq-find (lambda (e) (equal (plist-get e :b) id)) (pai-web-buffer-list t))))
+              (should entry)
+              (should (eq (plist-get entry :ro) t)))
+            (should (eq (pai-web--need-buffer id t) other))
+            (should-error (pai-web--need-buffer id))
+            (let ((r (pai-web-buffer-render (pai-web--need-buffer id t))))
+              (should (eq (plist-get r :ro) t))
+              (should (string-match-p "hello there" (plist-get r :html))))
+            (should-error (pai-web--action (list :a "key" :b id :keys "a")))
+            (should-error (pai-web--action (list :a "kill-buffer" :b id)))
+            (should (buffer-live-p other)))
+        (kill-buffer other)))))
+
+(ert-deftest pai-web-buffer-render-around-a-position ()
+  (let ((buf (generate-new-buffer "big"))
+        (pai-web-buffer-render-chars 100))
+    (unwind-protect
+        (progn
+          (with-current-buffer buf
+            (dotimes (i 100) (insert (format "line %03d\n" i)))
+            (goto-char (point-min)))
+          (let ((r (pai-web-buffer-render buf)))
+            (should (= (plist-get r :beg) 1))
+            (should-not (string-match-p "line 050" (plist-get r :html))))
+          (let ((r (pai-web-buffer-render buf 500)))
+            (should (> (plist-get r :beg) 1))
+            (should (string-match-p "line 05" (plist-get r :html)))))
+      (kill-buffer buf))))
+
 ;;;; Command
 
 (ert-deftest pai-web-command-is-registered-with-completion ()
