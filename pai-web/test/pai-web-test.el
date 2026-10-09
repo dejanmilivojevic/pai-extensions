@@ -571,6 +571,18 @@
         (pai-web-ask-answer (pai-ask-user-request-id req) nil nil nil t)
         (should (equal (plist-get (plist-get (car cell) :details) :status) "cancelled"))))))
 
+(ert-deftest pai-web-read-string-is-described ()
+  "`read-string' reaches `read-from-minibuffer' from C, so it has advice of
+its own (the reason prompt of rejecting a memory proposal was not shown)."
+  (pai-web-test--with-state
+    (should (assq 'read-string pai-web--prompt-advice))
+    (pai-web-bus-new-client 'open)
+    (let ((pai-web--origin t) seen)
+      (pai-web--advise-read-string (lambda (&rest _) (setq seen pai-web--pctx) "x")
+                                   "Reason: " nil nil '("why" "other"))
+      (should (eq (plist-get seen :kind) 'text))
+      (should (equal (plist-get seen :default) "why")))))
+
 ;;;; Remote buffers
 
 (defmacro pai-web-test--with-remote (buf &rest body)
