@@ -586,8 +586,11 @@ other non-nil value (e.g. `requested' or t) allows it."
 ;;;; Launch
 
 (defun pai-memory--skill-dirs ()
-  "Return the skill directories of the current pai buffer."
-  (if (fboundp 'pai--skill-dirs) (pai--skill-dirs) (pai-skills-default-dirs)))
+  "Return the skill directories of the current pai buffer that memory may edit.
+Shared directories (`pai-skills-shared-dirs', project `.agents/skills') hold
+skills installed for every agent; they are never patched, merged or archived."
+  (seq-remove #'pai-skills-shared-dir-p
+              (if (fboundp 'pai--skill-dirs) (pai--skill-dirs) (pai-skills-default-dirs))))
 
 (cl-defun pai-memory-promote (session &key reason learn force sources)
   "Launch the promoter over SESSION from the current pai buffer.
