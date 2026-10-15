@@ -1380,5 +1380,34 @@ and a foreground call gets the answer to its own message."
       (kill-buffer out)
       (pai-isub-test--teardown buf))))
 
+(ert-deftest pai-isub-agent-shell-drops-models-the-harness-lacks ()
+  "A pai model key, or an id the harness is known not to offer, is not sent
+to the harness; the parent's receipt says why."
+  (let ((buf (pai-isub-test--setup '(:default-backend "pai")))
+        (pai-isub-agent-shell--models '(("claude-code" ("opus" . "Opus") ("sonnet" . "Sonnet")))))
+    (unwind-protect
+        (pai-isub-test--with-quiet-parent
+          (pai-isub-test--with-fake-agent-shell
+            ;; the case seen in the wild: the parent passes its own model
+            (let* ((res (car (pai-isub-test--execute
+                              (list :agent "scout" :task "t" :harness "gemini-cli"
+                                    :model "faux/faux")
+                              buf)))
+                   (entry (with-current-buffer buf (car pai-isub--runs))))
+              (should (eq (plist-get res :is-error) :false))
+              (should-not (alist-get :default-model-id pai-isub-test--shell-config))
+              (should (equal (plist-get entry :model) "gemini-cli"))
+              (should (string-match-p "model faux/faux ignored"
+                                      (pai-content-text (plist-get res :content))))
+              (pai-isub-agent-shell-close (plist-get entry :handle)))
+            ;; known models: only those pass
+            (should (equal (pai-isub-agent-shell--check-model "claude-code" "opus") '("opus")))
+            (let ((r (pai-isub-agent-shell--check-model "claude-code" "anthropic/claude-x")))
+              (should-not (car r))
+              (should (string-match-p "(opus, sonnet)" (cdr r))))
+            ;; nothing known and no pai model: trust it
+            (should (equal (pai-isub-agent-shell--check-model "codex" "gpt-5") '("gpt-5")))))
+      (pai-isub-test--teardown buf))))
+
 (provide 'pai-interactive-subagents-test)
 ;;; pai-interactive-subagents-test.el ends here

@@ -544,8 +544,11 @@ continuation of a foreground (async false) call, or nil."
                 :emit (lambda (type &rest props)
                         (pai-isub-on-child-event entry type props)))))
         ;; a backend running its own model reports what it actually runs
-        (let ((label (plist-get (plist-get entry :handle) :model-label)))
-          (when label (plist-put entry :model label)))
+        (let ((label (plist-get (plist-get entry :handle) :model-label))
+              (note (plist-get (plist-get entry :handle) :note)))
+          (when label (plist-put entry :model label))
+          ;; e.g. a per-run model the backend could not use
+          (when note (plist-put entry :note note) (message "[subagent %s] %s" id note)))
         (pai-isub--record entry)
         (pai-isub--track-input entry)
         (pai-isub--arm-timeout entry (plist-get args :timeout))

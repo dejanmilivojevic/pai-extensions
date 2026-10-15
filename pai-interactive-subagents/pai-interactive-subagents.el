@@ -93,10 +93,11 @@
 (defun pai-isub--launch-receipt (entry)
   "Return the receipt text handed back for a background launch of ENTRY."
   (let ((buffer (pai-isub-entry-buffer entry)))
-    (format "Opened subagent %s (role %s, backend %s, model %s)%s. It is running your task now; its answer will be delivered here when the turn ends. Continue the conversation with subagent {\"action\":\"say\",\"id\":\"%s\",\"task\":\"…\"}; inspect it with action \"read\"."
+    (format "Opened subagent %s (role %s, backend %s, model %s)%s.%s It is running your task now; its answer will be delivered here when the turn ends. Continue the conversation with subagent {\"action\":\"say\",\"id\":\"%s\",\"task\":\"…\"}; inspect it with action \"read\"."
             (plist-get entry :id) (plist-get entry :role)
             (plist-get entry :backend) (or (plist-get entry :model) "-")
             (if (buffer-live-p buffer) (format " in buffer %s" (buffer-name buffer)) "")
+            (if (plist-get entry :note) (format " Note: %s." (plist-get entry :note)) "")
             (plist-get entry :id))))
 
 (defun pai-isub--roles-text (&optional with-source)
@@ -190,7 +191,7 @@ WITH-SOURCE appends each role's origin (see `pai-isub-role-source')."
                :task (pai-string-schema "The task (launch) or the message to send (say).")
                :id (pai-string-schema "Subagent id for say/read/stop/close/status (prefix ok; defaults to the newest live session).")
                :action (pai-string-schema "launch (default), say, read, status, stop, close, or list.")
-               :model (pai-string-schema "Model override: a pai model \"provider/id[:thinking]\"; in the agent-shell backend, the harness's own model id (\"opus\", optionally \"opus:high\").")
+               :model (pai-string-schema "Model override; omit it to use the role's configured model. For the pai backend a pai model \"provider/id[:thinking]\"; for agent-shell roles the harness's own model id (e.g. \"opus\" or \"opus:high\"), never a pai model key.")
                :backend (pai-string-schema "Session backend to run the role in: \"pai\" or \"agent-shell\" (default: the one configured for the role).")
                :harness (pai-string-schema "agent-shell harness (external agent) to run, e.g. \"claude-code\", \"gemini-cli\", \"codex\"; implies backend agent-shell.")
                :async (pai-boolean-schema "Run in background (default true). false keeps the tool call pending until the subagent finishes this turn.")

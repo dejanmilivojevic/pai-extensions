@@ -287,6 +287,34 @@ CURRENT is the initial choice.  Return the identifier or nil for inherit."
                                   (or current "inherit"))))
     (pai-isub--nonempty choice)))
 
+;;;; Model check
+;;
+;; A harness only accepts its own model ids.  The parent agent tends to pass
+;; a pai model key ("anthropic/claude-opus-4") as the per-run model, which
+;; the harness rejects ("Invalid value for config option model"), so a
+;; model the harness is not known to offer is dropped -- the harness then
+;; runs its default -- and the parent is told why.
+
+(defun pai-isub-agent-shell--check-model (agent model)
+  "Return (MODEL . NOTE) for running AGENT on MODEL.
+MODEL is kept when AGENT is known to offer it, or when nothing is known
+about AGENT's models and it is no pai model key; otherwise it becomes nil
+and NOTE says why."
+  (let ((model (pai-isub--nonempty model)))
+    (if (null model)
+        (cons nil nil)
+      (let ((known (ignore-errors (pai-isub-agent-shell-models agent))))
+        (cond
+         ((assoc model known) (cons model nil))
+         ((or known (ignore-errors (pai-model model)))
+          (cons nil
+                (format "model %s ignored: agent-shell harness %s runs its own models%s; using its default. Omit `model' for this role, or pass one of the harness's ids"
+                        model agent
+                        (if known
+                            (format " (%s)" (mapconcat #'car known ", "))
+                          ""))))
+         (t (cons model nil)))))))
+
 ;;;; First-message preamble
 
 (defun pai-isub-agent-shell--context-text (messages)
@@ -393,7 +421,7 @@ Calls ORIG with ARGS for everything else."
 ;;;; Event handling
 ;;
 ;; HANDLE is a mutable plist: (:buffer :backend :id :role :parent :agent
-;; :agent-model :model-label :emit :token :thinking :tools :auto-approve
+;; :agent-model :note :model-label :emit :token :thinking :tools :auto-approve
 ;; :ready :busy :queue :preamble :stash :text :prev-text :after-tool :chars
 ;; :started :exited).
 
@@ -664,12 +692,14 @@ Runs from a timer so agent-shell finishes its own event handling first."
                     (and (buffer-live-p parent)
                          (with-current-buffer parent (pai-isub-default-harness)))
                     (error "No agent-shell agent configured; pick a harness with /subagents-harness")))
-         (agent-model (plist-get options :agent-model))
+         (checked (pai-isub-agent-shell--check-model agent (plist-get options :agent-model)))
+         (agent-model (car checked))
          (cwd (file-name-as-directory
                (expand-file-name (or (plist-get spec :cwd) default-directory))))
          (handle (list :buffer nil :backend pai-isub-agent-shell-name
                        :id (plist-get spec :id) :role (plist-get spec :role)
                        :parent parent :agent agent :agent-model agent-model
+                       :note (cdr checked)
                        :model-label (if (and agent-model (not (string-empty-p agent-model)))
                                         (format "%s/%s" agent agent-model)
                                       agent)
