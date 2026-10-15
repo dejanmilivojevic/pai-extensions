@@ -42,6 +42,8 @@
 ;;   (emit 'ready)                    session is up and idle
 ;;   (emit 'busy)                     a turn started
 ;;   (emit 'turn-end :text STR)       a turn finished with final text STR
+;;                                    (:pending t: more parent messages are
+;;                                    queued, each answered by a later turn)
 ;;   (emit 'reply :text STR)          explicit message aimed at the parent
 ;;   (emit 'status :text STR)         free-form status for the parent's UI
 ;;   (emit 'waiting :until TIME :text STR)

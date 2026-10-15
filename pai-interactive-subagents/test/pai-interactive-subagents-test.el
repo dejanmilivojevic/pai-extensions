@@ -1207,6 +1207,41 @@ queues while busy, and reports its exit."
       (ask "read" "Read a.el")
       (should (equal (last-answer) "yes")))))
 
+(ert-deftest pai-isub-agent-shell-queued-messages-each-get-answered ()
+  "Parent messages queued while the agent is busy are all answered,
+and a foreground call gets the answer to its own message."
+  (pai-isub-test--with-shell-child nil
+    (pai-isub-test--shell-event 'init-finished)
+    (pai-isub-test--wait 0.05)
+    (pai-isub-test--shell-event 'input-submitted)
+    (cl-flet ((finish (text)
+                (pai-isub-test--shell-event 'agent-message-chunk `((:text-chunk . ,text)))
+                (pai-isub-test--shell-event 'turn-complete '((:stop-reason . "end_turn")))
+                (pai-isub-test--wait 0.05)
+                (pai-isub-test--shell-event 'input-submitted)))
+      ;; task turn running; two more messages, the second one foreground
+      (let (fg)
+        (pai-isub-say entry "second" nil nil)
+        (pai-isub-say entry "third" nil (lambda (r) (setq fg r)))
+        (should (= 2 (length (plist-get handle :queue))))
+        (finish "ANSWER-1")
+        (should (string-match-p "ANSWER-1" (car pai-isub-test--started)))
+        (should (plist-get entry :awaiting))
+        (should-not fg)
+        (finish "ANSWER-2")
+        (should (string-match-p "ANSWER-2" (car pai-isub-test--started)))
+        (should-not fg)
+        (pai-isub-test--shell-event 'agent-message-chunk '((:text-chunk . "ANSWER-3")))
+        (pai-isub-test--shell-event 'turn-complete '((:stop-reason . "end_turn")))
+        (should (equal (pai-content-text (plist-get fg :content)) "ANSWER-3"))
+        (should-not (plist-get entry :awaiting))
+        (should (equal (plist-get entry :status) "idle"))
+        (should (= 3 (length (pai-isub-test--sent-to-shell))))))))
+
+(defun pai-isub-test--sent-to-shell ()
+  "Return the texts submitted to the fake shell, oldest first."
+  (reverse pai-isub-test--shell-inserted))
+
 (ert-deftest pai-isub-agent-shell-keeps-typed-input ()
   "A parent message stashes what the user typed and gives it back after the turn."
   (pai-isub-test--with-shell-child nil

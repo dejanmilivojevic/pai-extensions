@@ -243,8 +243,10 @@ Return non-nil when a call was waiting.  IS-ERROR marks it as a failure."
                              :is-error (if is-error t :false)))
       t)))
 
-(defun pai-isub--deliver (entry kind text)
-  "Deliver TEXT of KIND from ENTRY into its parent conversation."
+(defun pai-isub--deliver (entry kind text &optional keep-pending)
+  "Deliver TEXT of KIND from ENTRY into its parent conversation.
+With KEEP-PENDING, a waiting foreground call is left for a later turn and
+TEXT goes to the parent as a notice instead."
   (let ((parent (plist-get entry :parent)))
     (when (buffer-live-p parent)
       (with-current-buffer parent
@@ -254,6 +256,7 @@ Return non-nil when a call was waiting.  IS-ERROR marks it as a failure."
           (plist-put entry :last-output body)
           (pai-isub--record entry)
           (unless (and (memq kind '(turn-end error exit))
+                       (not keep-pending)
                        (pai-isub--complete-pending entry body (eq kind 'error)))
             (let ((notice (pai-isub--notice entry kind body)))
               (cond
@@ -414,15 +417,23 @@ This is the single funnel every backend reports through."
       ('reply
        (pai-isub--deliver entry 'reply text))
       ('turn-end
-       (pai-isub--clear-timer entry)
-       (plist-put entry :status "idle")
        (plist-put entry :turns (1+ (or (plist-get entry :turns) 0)))
-       (let ((awaiting (plist-get entry :awaiting)))
-         (plist-put entry :awaiting nil)
-         (if (or awaiting (plist-get entry :on-done)
-                 (pai-isub--report-all-p parent))
-             (pai-isub--deliver entry 'turn-end text)
-           (plist-put entry :last-output text))))
+       (if (plist-get props :pending)
+           ;; more parent messages are queued in the child, each its own
+           ;; turn: report this one, but keep waiting (and any foreground
+           ;; call) for the last
+           (if (or (plist-get entry :awaiting) (plist-get entry :on-done)
+                   (pai-isub--report-all-p parent))
+               (pai-isub--deliver entry 'turn-end text t)
+             (plist-put entry :last-output text))
+         (pai-isub--clear-timer entry)
+         (plist-put entry :status "idle")
+         (let ((awaiting (plist-get entry :awaiting)))
+           (plist-put entry :awaiting nil)
+           (if (or awaiting (plist-get entry :on-done)
+                   (pai-isub--report-all-p parent))
+               (pai-isub--deliver entry 'turn-end text)
+             (plist-put entry :last-output text)))))
       ('error
        ;; An interrupted or failed turn does not necessarily end the session:
        ;; keep it usable when its buffer is still there.

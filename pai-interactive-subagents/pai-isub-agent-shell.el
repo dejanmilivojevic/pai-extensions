@@ -414,6 +414,8 @@ Return non-nil when an answer was sent."
               (text (pai-isub-agent-shell--final-text handle)))
          (pai-isub-agent-shell--emit
           handle 'turn-end
+          ;; parent messages still queued: each becomes a turn of its own
+          :pending (and (plist-get handle :queue) t)
           :text (if (or (null reason) (member reason '("end_turn" "")))
                     text
                   (format "%s\n\n(stop reason: %s)" text reason))))
