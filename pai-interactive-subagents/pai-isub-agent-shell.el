@@ -692,7 +692,11 @@ Runs from a timer so agent-shell finishes its own event handling first."
                     (and (buffer-live-p parent)
                          (with-current-buffer parent (pai-isub-default-harness)))
                     (error "No agent-shell agent configured; pick a harness with /subagents-harness")))
-         (checked (pai-isub-agent-shell--check-model agent (plist-get options :agent-model)))
+         ;; pai models are registered per session: check in the parent's
+         (checked (if (buffer-live-p parent)
+                      (with-current-buffer parent
+                        (pai-isub-agent-shell--check-model agent (plist-get options :agent-model)))
+                    (pai-isub-agent-shell--check-model agent (plist-get options :agent-model))))
          (agent-model (car checked))
          (cwd (file-name-as-directory
                (expand-file-name (or (plist-get spec :cwd) default-directory))))
