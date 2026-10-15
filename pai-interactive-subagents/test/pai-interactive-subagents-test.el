@@ -908,5 +908,345 @@
       (delete-directory home t)
       (delete-directory project t))))
 
+;;;; Per-model backends
+
+(ert-deftest pai-isub-model-backend-mapping-round-trips ()
+  "A model's backend entry persists through JSON and can be removed."
+  (let ((buf (pai-isub-test--setup)))
+    (unwind-protect
+        (with-current-buffer buf
+          (cl-letf (((symbol-function 'pai-settings-save) (lambda (&rest _) nil)))
+            (pai-isub-set-model-backend "faux/faux" (list :backend "agent-shell"
+                                                          :agent "claude-code"
+                                                          :agent-model ""))
+            (pai-isub-set-model-backend "other/x:free" (list :backend "pai"))
+            (let* ((json (pai-json-encode (list pai-isub-settings-key (pai-isub-config))))
+                   (back (pai-json-decode json)))
+              (setq-local pai-settings--project back))
+            (should (equal (pai-isub-model-backend pai--model)
+                           '(:backend "agent-shell" :agent "claude-code")))
+            (should (equal (plist-get (pai-isub-model-backend "other/x:free") :backend) "pai"))
+            (should (equal (mapcar #'car (pai-isub-model-backends))
+                           '("faux/faux" "other/x:free")))
+            ;; "inherit" removes the mapping, others stay
+            (pai-isub-set-model-backend "faux/faux" (list :backend "inherit"))
+            (should-not (pai-isub-model-backend "faux/faux"))
+            (should (pai-isub-model-backend "other/x:free"))))
+      (pai-isub-test--teardown buf))))
+
+(ert-deftest pai-isub-model-backend-precedence ()
+  "The model's backend beats the default, but not a per-run or role choice."
+  (let ((buf (pai-isub-test--setup)))
+    (unwind-protect
+        (with-current-buffer buf
+          (cl-letf (((symbol-function 'pai-settings-save) (lambda (&rest _) nil)))
+            (pai-isub-set-model-backend "faux/faux" (list :backend "agent-shell" :agent "gemini-cli"))
+            (should (equal (pai-isub-resolve-backend "scout" nil pai--model) "agent-shell"))
+            (should (equal (pai-isub-resolve-backend "scout" nil "faux/faux") "agent-shell"))
+            ;; no model: the default backend
+            (should (equal (pai-isub-resolve-backend "scout") "mock"))
+            (should (equal (pai-isub-resolve-backend "scout" "pai" pai--model) "pai"))
+            (pai-isub-set-override "scout" :backend "pai")
+            (should (equal (pai-isub-resolve-backend "scout" nil pai--model) "pai"))
+            ;; options only for the backend the model is mapped to
+            (should (equal (plist-get (pai-isub-backend-options "agent-shell" pai--model) :agent)
+                           "gemini-cli"))
+            (should-not (pai-isub-backend-options "pai" pai--model))))
+      (pai-isub-test--teardown buf))))
+
+(ert-deftest pai-isub-launch-uses-model-backend-and-options ()
+  "A launch on a mapped model runs in its backend with its options."
+  (let ((buf (pai-isub-test--setup '(:default-backend "pai"))))
+    (unwind-protect
+        (pai-isub-test--with-quiet-parent
+          (with-current-buffer buf
+            (cl-letf (((symbol-function 'pai-settings-save) (lambda (&rest _) nil)))
+              (pai-isub-set-model-backend "faux/faux" (list :backend "mock" :agent "a1"))))
+          (pai-isub-test--execute (list :agent "scout" :task "t") buf)
+          (let ((spec (cdr (assq 'start pai-isub-test--events)))
+                (entry (with-current-buffer buf (car pai-isub--runs))))
+            (should (equal (plist-get entry :backend) "mock"))
+            (should (equal (plist-get (plist-get spec :backend-options) :agent) "a1"))))
+      (pai-isub-test--teardown buf))))
+
+;;;; agent-shell backend (agent-shell itself stubbed)
+
+(defvar pai-isub-test--shell-sub nil "The backend's agent-shell subscriber.")
+(defvar pai-isub-test--shell-inserted nil "Texts submitted to the fake shell.")
+(defvar pai-isub-test--shell-status 'ready "What the fake `agent-shell-status' says.")
+(defvar pai-isub-test--shell-config nil "Config the fake shell was started with.")
+(defvar pai-isub-test--shell-buffer nil "The fake shell buffer.")
+(defvar pai-isub-test--shell-responses nil "Permission answers sent by the backend.")
+
+(defmacro pai-isub-test--with-fake-agent-shell (&rest body)
+  "Run BODY with agent-shell's entry points replaced by fakes."
+  (declare (indent 0))
+  `(let ((pai-isub-test--shell-sub nil)
+         (pai-isub-test--shell-buffer nil)
+         (pai-isub-test--shell-responses nil)
+         (pai-isub-test--shell-inserted nil)
+         (pai-isub-test--shell-status 'ready)
+         (pai-isub-test--shell-config nil))
+     (cl-letf (((symbol-function 'pai-isub-agent-shell-available-p) (lambda () t))
+               ((symbol-function 'agent-shell--resolved-agent-configs)
+                (lambda () (list '((:identifier . claude-code) (:buffer-name . "Claude"))
+                                 '((:identifier . gemini-cli)))))
+               ((symbol-function 'agent-shell--start)
+                (lambda (&rest args)
+                  (setq pai-isub-test--shell-config (plist-get args :config))
+                  (setq pai-isub-test--shell-buffer (generate-new-buffer " *fake-agent-shell*"))))
+               ((symbol-function 'agent-shell--send-permission-response)
+                (lambda (&rest args)
+                  (push (plist-get args :option-id) pai-isub-test--shell-responses)))
+               ((symbol-function 'agent-shell-subscribe-to)
+                (lambda (&rest args) (setq pai-isub-test--shell-sub (plist-get args :on-event)) 1))
+               ((symbol-function 'agent-shell-status) (lambda (&rest _) pai-isub-test--shell-status))
+               ((symbol-function 'agent-shell-insert)
+                (lambda (&rest args)
+                  (push (plist-get args :text) pai-isub-test--shell-inserted)))
+               ((symbol-function 'agent-shell-interrupt) (lambda (&rest _) nil))
+               ((symbol-function 'pai-isub-display) (lambda (&rest _) nil)))
+       ,@body)))
+
+(defun pai-isub-test--shell-event (event &rest data)
+  "Send EVENT with DATA (an alist) to the backend's subscriber."
+  (with-current-buffer pai-isub-test--shell-buffer
+    (funcall pai-isub-test--shell-sub
+             (append (list (cons :event event)) (when data (list (cons :data (car data))))))))
+
+(ert-deftest pai-isub-agent-shell-backend-round-trip ()
+  "An agent-shell child gets the role preamble, reports its final message,
+queues while busy, and reports its exit."
+  (let ((buf (pai-isub-test--setup '(:default-backend "agent-shell"))))
+    (unwind-protect
+        (pai-isub-test--with-quiet-parent
+          (pai-isub-test--with-fake-agent-shell
+            (with-current-buffer buf
+              (cl-letf (((symbol-function 'pai-settings-save) (lambda (&rest _) nil)))
+                (pai-isub-set-model-backend "faux/faux" (list :backend "agent-shell"
+                                                              :agent "claude-code"
+                                                              :agent-model "opus"))))
+            (let* ((res (car (pai-isub-test--execute
+                              (list :agent "scout" :task "map the repo") buf)))
+                   (entry (with-current-buffer buf (car pai-isub--runs)))
+                   (handle (plist-get entry :handle)))
+              (should (eq (plist-get res :is-error) :false))
+              (should (equal (plist-get entry :backend) "agent-shell"))
+              (should (equal (plist-get entry :model) "claude-code/opus"))
+              ;; the agent's model is selected through the copied config
+              (should (equal (funcall (alist-get :default-model-id pai-isub-test--shell-config))
+                             "opus"))
+              ;; nothing is submitted before the session is ready
+              (pai-isub-test--wait 0.05)
+              (should-not pai-isub-test--shell-inserted)
+              (pai-isub-test--shell-event 'init-finished)
+              (pai-isub-test--wait 0.05)
+              (should (= 1 (length pai-isub-test--shell-inserted)))
+              (let ((first (car pai-isub-test--shell-inserted)))
+                (should (string-match-p "<subagent_session role=\"scout\"" first))
+                (should (string-match-p "map the repo" first)))
+              (pai-isub-test--shell-event 'input-submitted)
+              (should (equal (plist-get entry :status) "running"))
+              ;; a follow-up while busy is queued, without the preamble
+              (pai-isub-say entry "and the tests" nil nil)
+              (pai-isub-test--wait 0.05)
+              (should (= 1 (length pai-isub-test--shell-inserted)))
+              ;; only the message after the last tool call is the report
+              (pai-isub-test--shell-event 'agent-message-chunk '((:text-chunk . "Let me look.")))
+              (pai-isub-test--shell-event 'tool-call-update)
+              (pai-isub-test--shell-event 'agent-message-chunk '((:text-chunk . "Found ")))
+              (pai-isub-test--shell-event 'agent-message-chunk '((:text-chunk . "3 files.")))
+              (pai-isub-test--shell-event 'turn-complete '((:stop-reason . "end_turn")))
+              (should (equal (plist-get entry :last-output) "Found 3 files."))
+              (should (string-match-p "Found 3 files\\." (car pai-isub-test--started)))
+              ;; the queued message goes out once the turn is over
+              (pai-isub-test--wait 0.05)
+              (should (= 2 (length pai-isub-test--shell-inserted)))
+              (should (string-match-p "and the tests" (car pai-isub-test--shell-inserted)))
+              (should-not (string-match-p "subagent_session" (car pai-isub-test--shell-inserted)))
+              ;; killing the shell ends the session
+              (pai-isub-agent-shell-close handle)
+              (should (equal (plist-get entry :status) "closed")))))
+      (pai-isub-test--teardown buf))))
+
+(ert-deftest pai-isub-agent-shell-needs-an-agent ()
+  "Starting without a configured agent is a clear error."
+  (let ((buf (pai-isub-test--setup)))
+    (unwind-protect
+        (pai-isub-test--with-quiet-parent
+          (pai-isub-test--with-fake-agent-shell
+            (let ((res (car (pai-isub-test--execute
+                             (list :agent "scout" :task "t" :backend "agent-shell") buf))))
+              (should (eq (plist-get res :is-error) t))
+              (should (string-match-p "No agent-shell agent"
+                                      (pai-content-text (plist-get res :content)))))
+            ;; the setting supplies one
+            (with-current-buffer buf
+              (setq-local pai-settings--project
+                          (list pai-isub-settings-key
+                                '(:default-backend "agent-shell" :agent-shell-agent "gemini-cli"))))
+            (let ((res (car (pai-isub-test--execute (list :agent "scout" :task "t") buf))))
+              (should (eq (plist-get res :is-error) :false))
+              (should (eq (alist-get :identifier pai-isub-test--shell-config) 'gemini-cli))
+              (pai-isub-agent-shell-close
+               (plist-get (with-current-buffer buf (car pai-isub--runs)) :handle)))))
+      (pai-isub-test--teardown buf))))
+
+(defmacro pai-isub-test--with-shell-child (spec-args &rest body)
+  "Launch an agent-shell child with SPEC-ARGS bound as ENTRY and HANDLE in BODY."
+  (declare (indent 1))
+  `(let ((buf (pai-isub-test--setup)))
+     (unwind-protect
+         (pai-isub-test--with-quiet-parent
+           (pai-isub-test--with-fake-agent-shell
+             (with-current-buffer buf
+               (cl-letf (((symbol-function 'pai-settings-save) (lambda (&rest _) nil)))
+                 (pai-isub-set-model-backend "faux/faux" (list :backend "agent-shell"
+                                                               :agent "claude-code"))))
+             (pai-isub-test--execute (append (list :agent "scout" :task "go") ,spec-args) buf)
+             (let* ((entry (with-current-buffer buf (car pai-isub--runs)))
+                    (handle (plist-get entry :handle)))
+               (ignore entry handle)
+               (unwind-protect (progn ,@body)
+                 (pai-isub-agent-shell-close handle)))))
+       (pai-isub-test--teardown buf))))
+
+(ert-deftest pai-isub-agent-shell-reply-to-parent-over-mcp ()
+  "The child gets a pai-parent MCP server whose reply_to_parent reaches the parent."
+  (pai-isub-test--with-shell-child nil
+    (let* ((servers (alist-get :mcp-servers pai-isub-test--shell-config))
+           (server (seq-find (lambda (s) (equal (alist-get 'name s) "pai-parent")) servers))
+           (token (plist-get handle :token)))
+      (should server)
+      (should (member token (alist-get 'args server)))
+      (let* ((list (pai-isub-mcp-handle token '(:id 1 :method "tools/list")))
+             (tools (plist-get (plist-get list :result) :tools)))
+        (should (equal (plist-get (aref tools 0) :name) "reply_to_parent")))
+      (let ((res (pai-isub-mcp-handle
+                  token '(:id 2 :method "tools/call"
+                          :params (:name "reply_to_parent" :arguments (:message "need a decision"))))))
+        (should (eq (plist-get (plist-get res :result) :isError) :false)))
+      (pai-isub-test--wait 0.05)
+      (should (string-match-p "says\\]\nneed a decision" (car pai-isub-test--started)))
+      ;; an unknown token is refused; closing forgets the child's token
+      (should (plist-get (pai-isub-mcp-handle "nope" '(:id 3 :method "tools/list")) :error))
+      (pai-isub-agent-shell-close handle)
+      (should-not (gethash token pai-isub-mcp--children)))))
+
+(ert-deftest pai-isub-agent-shell-parent-command ()
+  "`/parent TEXT' typed in the shell goes to the parent, not the agent."
+  (pai-isub-test--with-shell-child nil
+    (with-current-buffer pai-isub-test--shell-buffer
+      (should pai-isub-agent-shell-child-mode)
+      (let ((input "/parent please check the API") (called nil))
+        (cl-letf (((symbol-function 'pai-isub-agent-shell--input-text) (lambda () input))
+                  ((symbol-function 'pai-isub-agent-shell--input-bounds) (lambda () nil)))
+          (pai-isub-agent-shell--submit-advice (lambda () (setq called t)))
+          (should-not called)
+          (setq input "just for the agent")
+          (pai-isub-agent-shell--submit-advice (lambda () (setq called t)))
+          (should called))))
+    (should (string-match-p "please check the API" (car pai-isub-test--started)))))
+
+(ert-deftest pai-isub-agent-shell-thought-level-mapping ()
+  "pai thinking levels pick the agent's matching or nearest thought level."
+  (let ((option '((:options . (((:value . "low") (:name . "Low"))
+                               ((:value . "medium") (:name . "Medium"))
+                               ((:value . "high") (:name . "High")))))))
+    (should (equal (pai-isub-agent-shell--thought-level option 'high) "high"))
+    (should (equal (pai-isub-agent-shell--thought-level option 'off) "low"))
+    (should (equal (pai-isub-agent-shell--thought-level option 'max) "high"))
+    (should (equal (pai-isub-agent-shell--thought-level option 'minimal) "low"))))
+
+(ert-deftest pai-isub-agent-shell-applies-thinking-before-first-prompt ()
+  "The role's thinking level is selected before the task is submitted."
+  (let (set-to on-success)
+    (cl-letf (((symbol-function 'agent-shell--config-option-by-category)
+               (lambda (&rest _) '((:current-value . "low")
+                                   (:options . (((:value . "low")) ((:value . "high")))))))
+              ((symbol-function 'agent-shell--config-option-set-thought-level-id)
+               (lambda (&rest args)
+                 (setq set-to (plist-get args :thought-level-id)
+                       on-success (plist-get args :on-success)))))
+      (pai-isub-test--with-shell-child '(:model "faux/faux:high")
+        (pai-isub-test--shell-event 'init-finished)
+        (should (equal set-to "high"))
+        (pai-isub-test--wait 0.05)
+        (should-not pai-isub-test--shell-inserted)
+        (funcall on-success)
+        (pai-isub-test--wait 0.05)
+        (should (= 1 (length pai-isub-test--shell-inserted)))))))
+
+(ert-deftest pai-isub-agent-shell-permission-policy ()
+  "Own tool approved, tools outside the role's allowlist rejected, others asked."
+  (pai-isub-test--with-shell-child nil
+    (with-current-buffer pai-isub-test--shell-buffer
+      (setq-local agent-shell--state
+                  (list (cons :client 'c)
+                        (cons :tool-calls
+                              (list (cons "t1" (list (cons :permission-actions
+                                                           '(((:kind . "allow_once") (:option-id . "yes"))
+                                                             ((:kind . "reject_once") (:option-id . "no")))))))))))
+    (plist-put handle :tools '("read" "grep"))
+    (cl-flet ((ask (kind title)
+                (pai-isub-test--shell-event
+                 'permission-request
+                 `((:request-id . 7) (:tool-call-id . "t1")
+                   (:tool-call . ((:kind . ,kind) (:title . ,title))))))
+              (last-answer () (prog1 (car pai-isub-test--shell-responses)
+                                (setq pai-isub-test--shell-responses nil))))
+      (ask "other" "mcp__pai-parent__reply_to_parent")
+      (should (equal (last-answer) "yes"))
+      (ask "execute" "rm -rf /")
+      (should (equal (last-answer) "no"))
+      (should (string-match-p "rejected" (plist-get entry :last-output)))
+      (ask "search" "grep foo")
+      (should-not (last-answer))
+      (should (string-match-p "waiting for permission" (plist-get entry :last-output)))
+      (plist-put handle :auto-approve t)
+      (ask "read" "Read a.el")
+      (should (equal (last-answer) "yes")))))
+
+(ert-deftest pai-isub-agent-shell-keeps-typed-input ()
+  "A parent message stashes what the user typed and gives it back after the turn."
+  (pai-isub-test--with-shell-child nil
+    (pai-isub-test--shell-event 'init-finished)
+    (pai-isub-test--wait 0.05)
+    (pai-isub-test--shell-event 'input-submitted)
+    (pai-isub-test--shell-event 'turn-complete '((:stop-reason . "end_turn")))
+    (pai-isub-test--wait 0.05)
+    (with-current-buffer pai-isub-test--shell-buffer
+      (erase-buffer)
+      (insert "PROMPT> half typed")
+      (let ((start 9))
+        (cl-letf (((symbol-function 'pai-isub-agent-shell--input-bounds)
+                   (lambda () (and (<= start (point-max)) (cons start (point-max))))))
+          (should (pai-isub-agent-shell-pending-input-p handle))
+          (pai-isub-say entry "more work" nil nil)
+          (pai-isub-test--wait 0.05)
+          (should (equal (buffer-string) "PROMPT> "))
+          (should (equal (plist-get handle :stash) "half typed"))
+          (should (pai-isub-agent-shell-pending-input-p handle))
+          (pai-isub-test--shell-event 'input-submitted)
+          (pai-isub-test--shell-event 'turn-complete '((:stop-reason . "end_turn")))
+          (pai-isub-test--wait 0.05)
+          (should (equal (buffer-string) "PROMPT> half typed"))
+          (should-not (plist-get handle :stash)))))))
+
+(ert-deftest pai-isub-model-backend-command-is-offered ()
+  "`/subagents-model-backend' completes \"list\" and model keys."
+  (let ((buf (pai-isub-test--setup)))
+    (unwind-protect
+        (with-current-buffer buf
+          (let ((cmd (gethash "subagents-model-backend" pai--commands)))
+            (should cmd)
+            (let ((completions (funcall (plist-get cmd :arg-completions) "")))
+              (should (member "list" completions))
+              (should (member "faux/faux" completions))))
+          (should (string-match-p "No per-model backends"
+                                  (plist-get (pai-isub-model-backend-command "list" nil)
+                                             :message))))
+      (pai-isub-test--teardown buf))))
+
 (provide 'pai-interactive-subagents-test)
 ;;; pai-interactive-subagents-test.el ends here

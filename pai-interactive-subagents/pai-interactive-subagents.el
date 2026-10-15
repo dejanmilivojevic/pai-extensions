@@ -13,8 +13,9 @@
 ;;     with the `say' action instead of starting from scratch.
 ;;
 ;; How a session is created and driven is a pluggable BACKEND (see
-;; `pai-isub-backend'): "pai" ships here, and another -- an `agent-shell'
-;; buffer, say -- can be registered without touching anything else.
+;; `pai-isub-backend'): "pai" (a pai chat buffer) and "agent-shell" (an
+;; external ACP agent in an `agent-shell' buffer) ship here.  The backend is
+;; chosen per run, per role, or per model (`/subagents-model-backend').
 
 ;;; Commentary:
 
@@ -50,6 +51,7 @@
 (require 'pai-isub-backend)
 (require 'pai-isub-roles)
 (require 'pai-isub-session)
+(require 'pai-isub-agent-shell)
 (require 'pai-isub-runs)
 
 (declare-function pai-settings-ui-register-section "pai-settings-ui")
@@ -187,7 +189,7 @@ WITH-SOURCE appends each role's origin (see `pai-isub-role-source')."
                :id (pai-string-schema "Subagent id for say/read/stop/close/status (prefix ok; defaults to the newest live session).")
                :action (pai-string-schema "launch (default), say, read, status, stop, close, or list.")
                :model (pai-string-schema "Model override \"provider/id\" or \"provider/id:thinking\".")
-               :backend (pai-string-schema "Session backend to run the role in (default \"pai\").")
+               :backend (pai-string-schema "Session backend to run the role in: \"pai\" or \"agent-shell\" (default: the one configured for the role or its model).")
                :async (pai-boolean-schema "Run in background (default true). false keeps the tool call pending until the subagent finishes this turn.")
                :context (pai-string-schema "\"fork\" starts the session with your conversation so far; \"fresh\" starts clean.")
                :max-lines (pai-number-schema "Max output lines returned to you.")
@@ -244,11 +246,19 @@ the same name, so enable one or the other, not both.")
     (list :message
           (string-join
            (mapcar (lambda (name)
-                     (let ((resolved (pai-isub-resolve-model name nil parent)))
+                     (let* ((resolved (pai-isub-resolve-model name nil parent))
+                            (backend (pai-isub-resolve-backend name nil (car resolved)))
+                            (options (pai-isub-backend-options backend (car resolved))))
                        (format "%-16s %-28s %s" name
                                (if resolved (pai-model-key (car resolved)) "(unresolved)")
-                               (format "%s%s"
-                                       (pai-isub-resolve-backend name)
+                               (format "%s%s%s"
+                                       backend
+                                       (if (plist-get options :agent)
+                                           (format " [%s%s]" (plist-get options :agent)
+                                                   (if (plist-get options :agent-model)
+                                                       (format "/%s" (plist-get options :agent-model))
+                                                     ""))
+                                         "")
                                        (if (and resolved (cadr resolved))
                                            (format " :%s" (cadr resolved)) "")))))
                    names)
@@ -279,6 +289,66 @@ the same name, so enable one or the other, not both.")
     (pai-isub-set-override role :backend backend)
     (list :message (format "subagent %s runs in backend %s" role
                            (pai-isub-resolve-backend role)))))
+
+(defun pai-isub--model-backends-text ()
+  "Return the per-model backend mapping, one line per model."
+  (let ((entries (pai-isub-model-backends)))
+    (if (null entries)
+        "No per-model backends; every model runs in the role's or default backend."
+      (mapconcat (lambda (e)
+                   (let ((p (cdr e)))
+                     (format "%-32s %s%s%s" (car e) (plist-get p :backend)
+                             (if (plist-get p :agent) (format " agent %s" (plist-get p :agent)) "")
+                             (if (plist-get p :agent-model)
+                                 (format " model %s" (plist-get p :agent-model)) ""))))
+                 entries "\n"))))
+
+(defun pai-isub-read-model-backend (model)
+  "Read a backend entry for MODEL interactively; return the plist or nil.
+nil (backend \"inherit\") removes MODEL's mapping."
+  (let* ((current (pai-isub-model-backend model))
+         (backend (completing-read
+                   (format "Backend for %s (inherit = none): " model)
+                   (cons "inherit" (pai-isub-backend-names)) nil t nil nil
+                   (or (plist-get current :backend) "inherit"))))
+    (cond
+     ((member backend '("" "inherit")) nil)
+     ((equal backend pai-isub-agent-shell-name)
+      (let* ((agents (pai-isub-agent-shell-agent-names))
+             (agent (completing-read
+                     (format "agent-shell agent for %s: " model)
+                     agents nil (and agents t) nil nil
+                     (or (plist-get current :agent) (car agents))))
+             (agent-model (string-trim
+                           (read-string
+                            (format "%s model id (empty = agent default): " agent)
+                            (plist-get current :agent-model)))))
+        (list :backend backend :agent agent
+              :agent-model (unless (string-empty-p agent-model) agent-model))))
+     (t (list :backend backend)))))
+
+(defun pai-isub-model-backend-command (args _ctx)
+  "Handler for `/subagents-model-backend [model]': pick the backend a model runs in.
+With no model and no mappings, prompt for one; `/subagents-model-backend list'
+shows the mapping."
+  (let ((model (string-trim args)))
+    (if (equal model "list")
+        (list :message (pai-isub--model-backends-text))
+      (let* ((model (if (string-empty-p model)
+                        (completing-read "Model: " (pai-model-keys) nil nil)
+                      model))
+             (entry (pai-isub-read-model-backend model)))
+        (pai-isub-set-model-backend model entry)
+        (list :message
+              (if entry
+                  (format "Subagents on %s run in %s%s" model (plist-get entry :backend)
+                          (if (plist-get entry :agent)
+                              (format " (agent %s%s)" (plist-get entry :agent)
+                                      (if (plist-get entry :agent-model)
+                                          (format ", model %s" (plist-get entry :agent-model))
+                                        ""))
+                            ""))
+                (format "Removed the backend mapping for %s" model)))))))
 
 (defun pai-isub-roles-command (_args _ctx)
   "Handler for `/subagents-roles': list roles with descriptions."
@@ -336,6 +406,56 @@ the same name, so enable one or the other, not both.")
                       (vui-muted
                        (concat " " (truncate-string-to-width desc 24 nil nil "…"))))))))))))
    (pai-isub-role-names)))
+
+(defun pai-isub--settings-model-backend-items ()
+  "Return one settings row per mapped model, plus an action to add one."
+  (append
+   (mapcar
+    (lambda (pair)
+      (let ((model (car pair)))
+        (list
+         :key (intern (format ":isub-model-backend-%s" model)) :type 'custom
+         :render
+         (lambda (refresh)
+           (let* ((target (current-buffer))
+                  (entry (with-current-buffer target (pai-isub-model-backend model)))
+                  (shell-p (equal (plist-get entry :backend) pai-isub-agent-shell-name)))
+             (cl-flet ((write (key value)
+                         (when (buffer-live-p target)
+                           (with-current-buffer target
+                             (pai-isub-set-model-backend
+                              model
+                              (and (not (equal value "inherit"))
+                                   (plist-put (copy-sequence entry) key value)))))
+                         (funcall refresh)))
+               (apply
+                #'vui-hstack
+                (delq nil
+                      (list
+                       (vui-box (vui-text model) :width 32 :align :left)
+                       (vui-text "in:")
+                       (vui-select
+                        :value (plist-get entry :backend)
+                        :options (cons "inherit" (pai-isub-backend-names))
+                        :on-change (lambda (v) (write :backend v)))
+                       (when shell-p (vui-text "agent:"))
+                       (when shell-p
+                         (vui-select
+                          :value (or (plist-get entry :agent) "")
+                          :options (pai-isub-agent-shell-agent-names)
+                          :on-change (lambda (v) (write :agent v))))
+                       (when shell-p
+                         (vui-muted (format " model %s"
+                                            (or (plist-get entry :agent-model) "default")))))))))))))
+    (pai-isub-model-backends))
+   (list (list :key :isub-model-backend-add :type 'action
+               :label "Set backend for a model…"
+               :doc "Run subagents on a model in another backend (agent-shell agent and model)"
+               :action (lambda ()
+                         (let ((model (completing-read "Model: " (pai-model-keys) nil nil)))
+                           (unless (string-empty-p model)
+                             (pai-isub-set-model-backend
+                              model (pai-isub-read-model-backend model)))))))))
 
 (defun pai-isub--settings-manage-items ()
   "Return dynamic action items for managing role definitions."
@@ -411,6 +531,10 @@ the same name, so enable one or the other, not both.")
                              :description "Set the session backend for a role"
                              :handler #'pai-isub-set-backend-command
                              :arg-completions (lambda (_p) (pai-isub-role-names)))
+   (pai-ext-register-command api "subagents-model-backend"
+                             :description "Run subagents on a model in a backend, e.g. agent-shell (arg: model | list)"
+                             :handler #'pai-isub-model-backend-command
+                             :arg-completions (lambda (_p) (cons "list" (pai-model-keys))))
    (pai-ext-register-command api "subagents-roles"
                              :description "List available subagent roles"
                              :handler #'pai-isub-roles-command)
@@ -471,6 +595,24 @@ the same name, so enable one or the other, not both.")
    :doc "Let subagent sessions keep the subagent tool themselves"
    :get (lambda () (pai-isub-nested-allowed-p))
    :set (lambda (v) (pai-isub-config-set :allow-nested (if v t :false))))
+  (pai-settings-ui-register-item
+   'interactive-subagents 'defaults
+   :key :isub-agent-shell-agent :type 'choice :label "agent-shell agent"
+   :doc "Agent for the agent-shell backend when the model has no mapping (inherit = agent-shell's preferred)"
+   :choices (lambda () (cons "inherit" (pai-isub-agent-shell-agent-names)))
+   :get (lambda () (or (plist-get (pai-isub-config) :agent-shell-agent) "inherit"))
+   :set (lambda (v) (pai-isub-config-set :agent-shell-agent
+                                         (unless (equal v "inherit") v))))
+  (pai-settings-ui-register-item
+   'interactive-subagents 'defaults
+   :key :isub-agent-shell-auto-approve :type 'boolean :label "agent-shell auto-approve"
+   :doc "Approve agent-shell subagents' tool permission requests (within the role's tools) instead of asking"
+   :get (lambda () (pai-truthy (plist-get (pai-isub-config) :agent-shell-auto-approve)))
+   :set (lambda (v) (pai-isub-config-set :agent-shell-auto-approve (if v t :false))))
+  (pai-settings-ui-register-subsection
+   'interactive-subagents 'model-backends "Backend per model" 15)
+  (pai-settings-ui-register-dynamic-items
+   'interactive-subagents 'model-backends #'pai-isub--settings-model-backend-items)
   (pai-settings-ui-register-subsection
    'interactive-subagents 'roles "Roles (model · thinking · backend)" 20)
   (pai-settings-ui-register-dynamic-items

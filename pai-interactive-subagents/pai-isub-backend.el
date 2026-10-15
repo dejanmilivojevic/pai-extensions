@@ -15,6 +15,7 @@
 ;;    :send       (lambda (HANDLE TEXT) -> any)        ; required
 ;;    :buffer     (lambda (HANDLE) -> buffer)          ; default: (:buffer HANDLE)
 ;;    :busy-p     (lambda (HANDLE) -> bool)            ; optional
+;;    :pending-input-p (lambda (HANDLE) -> bool)       ; optional: typed, unsent
 ;;    :interrupt  (lambda (HANDLE))                    ; optional
 ;;    :close      (lambda (HANDLE))                    ; default: kill the buffer
 ;;    :metrics    (lambda (HANDLE) -> (:tokens N :tps N))   ; optional
@@ -134,6 +135,11 @@ Re-registering a name replaces the previous definition.  Return BACKEND."
   "Return non-nil when child HANDLE is mid-turn."
   (let ((fn (plist-get backend :busy-p)))
     (and fn (funcall fn handle))))
+
+(defun pai-isub-backend-pending-input-p (backend handle)
+  "Return non-nil when the user typed text in HANDLE's buffer not sent yet."
+  (let ((fn (plist-get backend :pending-input-p)))
+    (and fn (ignore-errors (funcall fn handle)))))
 
 (defun pai-isub-backend-interrupt (backend handle)
   "Interrupt the child HANDLE's current turn, if the backend can."

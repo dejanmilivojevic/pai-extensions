@@ -120,7 +120,8 @@ challenge this plan") — the model calls the tool.
 Slash commands: `/subagents [id]` (list), `/subagents-open [id]` (show its
 buffer), `/subagents-stop [id]`,
 `/subagents-close [id]`, `/subagents-models [role]`, `/subagents-model [role]`,
-`/subagents-backend [role]`, `/subagents-roles`, `/subagents-reload`, and — in
+`/subagents-backend [role]`, `/subagents-model-backend [model|list]`,
+`/subagents-roles`, `/subagents-reload`, and — in
 a child buffer — `/parent TEXT`.
 
 **Which model fills which role** (strongest first): per-run tool arg →
@@ -130,16 +131,55 @@ a child buffer — `/parent TEXT`.
 (model · thinking · backend); `/subagents-model reviewer` does the same from
 the prompt.
 
-**Backends.** How a subagent session is created and driven is pluggable: the
-`"pai"` backend (a pai chat buffer) ships with the extension, and another one —
-an `agent-shell` buffer, a remote session, a comint process — is a plist
-registered with `pai-isub-register-backend` providing `:start`/`:send` (plus
-optional `:busy-p`, `:interrupt`, `:close`, `:metrics`, `:transcript`). The
-child reports upstream through the `:emit` callback it is handed
-(`ready`/`busy`/`turn-end`/`reply`/`exit`); roles, model resolution, delivery
-into the parent turn and the status block are backend-agnostic. Pick the
-backend per role (`backend:` frontmatter, `/subagents-backend`) or globally
-(`:default-backend`).
+**Backends.** How a subagent session is created and driven is pluggable. Two
+ship with the extension: `"pai"` (a pai chat buffer) and `"agent-shell"` (an
+external ACP agent such as Claude Code, Gemini CLI or Codex, run in an
+[agent-shell](https://github.com/xenodium/agent-shell) buffer; the package is
+loaded only when needed). Others are plists registered with
+`pai-isub-register-backend` providing `:start`/`:send` (plus optional
+`:busy-p`, `:pending-input-p`, `:interrupt`, `:close`, `:metrics`,
+`:transcript`). The child reports upstream through the `:emit` callback it is
+handed (`ready`/`busy`/`turn-end`/`reply`/`status`/`exit`); roles, model
+resolution, delivery into the parent turn and the status block are
+backend-agnostic. Backend resolution: per-run `backend` arg → role override
+(`/subagents-backend`) → `backend:` frontmatter → **the backend configured for
+the resolved model** → `:default-backend` → `"pai"`.
+
+**Backend per model.** `/subagents-model-backend [model]` (or `/menu` →
+*Interactive subagents* → *Backend per model*) pins a model to a backend; for
+agent-shell it also picks the agent and, optionally, the agent's own model id:
+
+```elisp
+:interactive-subagents
+  (:model-backends (:anthropic/claude-opus-4 (:backend "agent-shell"
+                                             :agent "claude-code"
+                                             :agent-model "opus")))
+```
+
+Every role resolving to that model then runs in Claude Code on Opus.
+`/subagents-model-backend list` shows the mapping. A role forced into
+agent-shell without a mapping uses the *agent-shell agent* setting
+(`:agent-shell-agent`), then `agent-shell-preferred-agent-config`.
+
+An agent-shell subagent behaves like a pai one:
+
+- the role prompt and subagent protocol (and, with `context: fork`, the
+  parent conversation) open its first message;
+- `reply_to_parent` is offered through a per-child stdio MCP server
+  (`pai-parent`: a batch Emacs relaying to a 127.0.0.1 server in this Emacs,
+  authenticated by a random token), and its calls are approved automatically;
+- `/parent TEXT` typed at the shell's prompt (or `C-c C-S-p`) messages the
+  parent instead of the agent;
+- the final message of each turn goes back to the parent; parent messages that
+  arrive mid-turn are queued;
+- the role's thinking level selects the agent's matching or nearest thought
+  level before the first prompt;
+- a role's `tools:` allowlist rejects permission requests for other kinds of
+  tool (read/search/edit/execute/fetch); with *agent-shell auto-approve*
+  (`:agent-shell-auto-approve`) allowed requests are approved, otherwise you
+  answer them in the buffer and the parent's status shows the child waiting;
+- text you half-typed at its prompt survives a message from the parent and
+  keeps an idle subagent open.
 
 **Defining your own roles**: drop a markdown file in `~/.pai/subagents/` (home,
 every instance) or `<project>/.pai/subagents/` (trusted project only). Frontmatter

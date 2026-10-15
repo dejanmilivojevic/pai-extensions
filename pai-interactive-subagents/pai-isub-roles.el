@@ -16,7 +16,8 @@
 ;;   4. settings default:        :default-model
 ;;   5. the parent session's model ("inherit")
 ;;
-;; Backends resolve the same way (per-run arg, override, frontmatter,
+;; Backends resolve the same way (per-run arg, override, frontmatter, the
+;; backend configured for the resolved model under :model-backends,
 ;; :default-backend, then "pai").
 ;;
 ;; Settings live under the `:interactive-subagents' key.  Overrides are stored
@@ -315,15 +316,77 @@ PER-RUN wins, then the settings override, then role frontmatter, then
     (when (or (memq thinking pai-isub-thinking-levels) (null thinking))
       (and model (list model thinking)))))
 
-(defun pai-isub-resolve-backend (role &optional per-run)
+;;;; Per-model backends
+;;
+;; A model can be pinned to a backend: whenever a subagent resolves to that
+;; model it runs there unless the run or its role names a backend
+;; explicitly.  The entry also carries backend options -- for `agent-shell',
+;; which agent to start and which of its models to select:
+;;
+;;   :model-backends (:anthropic/claude-opus-4 (:backend "agent-shell"
+;;                                              :agent "claude-code"
+;;                                              :agent-model "opus"))
+
+(defun pai-isub--model-key-of (model)
+  "Return the key string of MODEL (a model plist or a key string), or nil."
+  (cond ((stringp model) (unless (string-empty-p model) model))
+        ((and model (listp model)) (pai-model-key model))))
+
+(defun pai-isub-model-backends ()
+  "Return the configured model -> backend entries as ((KEY . PLIST) ...)."
+  (let ((plist (plist-get (pai-isub-config) :model-backends))
+        out)
+    (while plist
+      (let ((k (pop plist)) (v (pop plist)))
+        (when (and (keywordp k) (plist-get v :backend))
+          (push (cons (substring (symbol-name k) 1) v) out))))
+    (sort out (lambda (a b) (string-lessp (car a) (car b))))))
+
+(defun pai-isub-model-backend (model)
+  "Return the backend entry plist configured for MODEL, or nil.
+MODEL is a model plist or a \"provider/id\" key."
+  (let ((key (pai-isub--model-key-of model)))
+    (and key (cdr (assoc key (pai-isub-model-backends))))))
+
+(defun pai-isub-set-model-backend (model entry)
+  "Configure MODEL (a key or plist) to run in the backend described by ENTRY.
+ENTRY is a plist (:backend NAME [:agent ID :agent-model ID]); nil, or a
+:backend of nil/\"\"/\"inherit\", removes the mapping.  Return ENTRY."
+  (let* ((key (or (pai-isub--model-key-of model) (error "No model given")))
+         (kw (intern (concat ":" key)))
+         (backend (plist-get entry :backend))
+         (clear (or (null backend) (member backend '("" "inherit"))))
+         (old (copy-sequence (plist-get (pai-isub-config) :model-backends)))
+         (new nil))
+    ;; rebuild without KEY, then append the new entry
+    (while old
+      (let ((k (pop old)) (v (pop old)))
+        (unless (eq k kw) (setq new (append new (list k v))))))
+    (unless clear
+      (setq new (append new (list kw (cl-loop for (k v) on entry by #'cddr
+                                              when (and v (not (equal v "")))
+                                              append (list k v))))))
+    (pai-isub-config-set :model-backends new)
+    entry))
+
+(defun pai-isub-resolve-backend (role &optional per-run model)
   "Return the backend name to run ROLE in.
-PER-RUN wins, then the settings override, then role frontmatter, then
-`:default-backend', then \"pai\"."
+PER-RUN wins, then the role's settings override, then role frontmatter, then
+the backend configured for MODEL (the resolved model, see
+`pai-isub-model-backend'), then `:default-backend', then \"pai\"."
   (or per-run
       (plist-get (pai-isub-override role) :backend)
       (plist-get (pai-isub-role role) :backend)
+      (plist-get (pai-isub-model-backend model) :backend)
       (plist-get (pai-isub-config) :default-backend)
       "pai"))
+
+(defun pai-isub-backend-options (backend model)
+  "Return the options for BACKEND configured for MODEL, or nil.
+Only when MODEL's mapping names BACKEND: a role forced into another backend
+does not pick up options meant for this one."
+  (let ((entry (pai-isub-model-backend model)))
+    (and (equal (plist-get entry :backend) backend) entry)))
 
 (defun pai-isub-role-context-mode (role &optional per-run)
   "Return the context mode symbol (`fresh' or `fork') for ROLE.
@@ -364,7 +427,9 @@ The `:allow-nested' setting wins; otherwise `pai-isub-allow-nested' applies."
 
 (defun pai-isub-role-backend-display (role)
   "Return the effective backend name to show for ROLE."
-  (pai-isub-resolve-backend role))
+  (pai-isub-resolve-backend
+   role nil (car (ignore-errors
+                   (pai-isub-resolve-model role nil (bound-and-true-p pai--model))))))
 
 (provide 'pai-isub-roles)
 ;;; pai-isub-roles.el ends here

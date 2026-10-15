@@ -344,7 +344,10 @@ parent chat buffer) when given -- timers and child events run elsewhere."
         (cond
          ;; in use: its window is selected, or a message is being written
          ((or (and (buffer-live-p buffer) (eq (window-buffer (selected-window)) buffer))
-              (pai-isub--pending-input-p buffer))
+              (pai-isub--pending-input-p buffer)
+              (let ((backend (pai-isub-entry-backend entry)))
+                (and backend (pai-isub-backend-pending-input-p
+                              backend (plist-get entry :handle)))))
           (pai-isub--arm-idle entry))
          ;; used since the timer was armed: wait out the rest
          ((> left 0.05) (pai-isub--arm-idle entry left))
@@ -484,10 +487,12 @@ continuation of a foreground (async false) call, or nil."
          (role-def (pai-isub-role role)))
     (unless role-def
       (error "Unknown subagent role %s; see /subagents-roles" role))
-    (let* ((backend-name (pai-isub-resolve-backend role (plist-get args :backend)))
-           (backend (pai-isub-backend backend-name))
-           (resolved (pai-isub-resolve-model role (plist-get args :model)
+    (let* ((resolved (pai-isub-resolve-model role (plist-get args :model)
                                              (plist-get ctx :model)))
+           (backend-name (pai-isub-resolve-backend role (plist-get args :backend)
+                                                   (car resolved)))
+           (backend (pai-isub-backend backend-name))
+           (options (pai-isub-backend-options backend-name (car resolved)))
            (context-mode (pai-isub-role-context-mode role (plist-get args :context)))
            (id (format "sub-%d" (cl-incf pai-isub--counter))))
       (unless backend
@@ -514,10 +519,14 @@ continuation of a foreground (async false) call, or nil."
                 :description (plist-get role-def :description)
                 :parent parent :cwd (or (plist-get ctx :cwd) default-directory)
                 :model (car resolved) :thinking (cadr resolved)
+                :backend-options options
                 :tools (pai-isub-role-tools role)
                 :context-messages (pai-isub--inherited-messages context-mode)
                 :emit (lambda (type &rest props)
                         (pai-isub-on-child-event entry type props)))))
+        ;; a backend running its own model reports what it actually runs
+        (let ((label (plist-get (plist-get entry :handle) :model-label)))
+          (when label (plist-put entry :model label)))
         (pai-isub--record entry)
         (pai-isub--track-input entry)
         (pai-isub--arm-timeout entry (plist-get args :timeout))
