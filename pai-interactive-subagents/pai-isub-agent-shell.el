@@ -6,17 +6,23 @@
 ;; Code, Gemini CLI, Codex, OpenCode, ...) driven by xenodium's agent-shell
 ;; package, opened next to the parent like the built-in pai backend.
 ;;
-;; Which agent, and which of its models, is configured per pai model (see
-;; `pai-isub-model-backends'), e.g. in settings:
+;; The external agent -- the HARNESS -- brings its own models, so pai's
+;; models do not apply here.  A role running in this backend names the
+;; harness to start and, optionally, which of the harness's models to
+;; select (see `pai-isub-resolve-harness'):
 ;;
 ;;   :interactive-subagents
-;;     (:model-backends (:anthropic/claude-opus-4 (:backend "agent-shell"
-;;                                                :agent "claude-code"
-;;                                                :agent-model "opus")))
+;;     (:overrides (:reviewer (:harness "claude-code" :harness-model "opus"))
+;;      :agent-shell-agent "gemini-cli"     ; default harness
+;;      :agent-shell-model nil)             ; default harness model
 ;;
-;; so a role resolving to that model runs in Claude Code.  A role forced into
-;; this backend without such a mapping uses the `:agent-shell-agent' setting,
-;; then `agent-shell-preferred-agent-config'.
+;; or per run: {"agent": "reviewer", "harness": "claude-code", "model": "opus"}.
+;; Without a harness the `:agent-shell-agent' setting applies, then
+;; `agent-shell-preferred-agent-config'.
+;;
+;; A harness only reports its models once a session is up, so the models
+;; seen in agent-shell sessions are remembered per harness (in
+;; `pai-isub-agent-shell-models-file') and offered when choosing one.
 ;;
 ;; It does what the pai backend does, in agent-shell's terms:
 ;;
@@ -56,6 +62,8 @@
 (defvar agent-shell-preferred-agent-config)
 (defvar agent-shell-mcp-servers)
 (declare-function agent-shell--start "agent-shell")
+(declare-function agent-shell-buffers "agent-shell")
+(declare-function agent-shell--get-available-models "agent-shell-config")
 (declare-function agent-shell--resolved-agent-configs "agent-shell")
 (declare-function agent-shell-subscribe-to "agent-shell")
 (declare-function agent-shell-insert "agent-shell")
@@ -71,6 +79,12 @@
 (defcustom pai-isub-agent-shell-context-chars 40000
   "Maximum characters of forked parent conversation sent to an agent-shell child."
   :type 'integer
+  :group 'pai-isub)
+
+(defcustom pai-isub-agent-shell-models-file nil
+  "File remembering the models each agent-shell harness offered.
+nil means \"subagents/agent-shell-models.eld\" under `pai-directory'."
+  :type '(choice (const :tag "Default" nil) file)
   :group 'pai-isub)
 
 (defconst pai-isub-agent-shell--protocol
@@ -140,16 +154,6 @@
   (and (buffer-live-p parent)
        (with-current-buffer parent (plist-get (pai-isub-config) key))))
 
-(defun pai-isub-agent-shell--default-agent (parent)
-  "Return the agent to use when no per-model one is configured, or nil.
-Settings are read in PARENT."
-  (or (pai-isub-agent-shell--id-name
-       (pai-isub-agent-shell--parent-config parent :agent-shell-agent))
-      (let ((pref (bound-and-true-p agent-shell-preferred-agent-config)))
-        (cond ((symbolp pref) (pai-isub-agent-shell--id-name pref))
-              ((and (consp pref) (symbolp (cdr pref))) (symbol-name (cdr pref)))
-              ((consp pref) (pai-isub-agent-shell--id-name (map-elt pref :identifier)))))))
-
 (defun pai-isub-agent-shell--make-config (agent agent-model &optional mcp-server)
   "Return a copy of AGENT's config, selecting AGENT-MODEL when non-nil.
 MCP-SERVER, an ACP server alist, is added to the servers the agent gets."
@@ -165,6 +169,123 @@ MCP-SERVER, an ACP server alist, is added to the servers the agent gets."
                         (bound-and-true-p agent-shell-mcp-servers))
                     (list mcp-server))))
     config))
+
+;;;; Harness models
+;;
+;; ACP agents list their models in the session/new response, so they are
+;; only known once a session of that harness has started.  Every live
+;; agent-shell session is a source; what was seen is kept on disk so the
+;; choice survives the sessions.
+
+(defvar pai-isub-agent-shell--models 'unloaded
+  "Alist HARNESS -> list of (MODEL-ID . NAME), or `unloaded'.")
+
+(defun pai-isub-agent-shell--models-file ()
+  "Return the file remembering harness models."
+  (or pai-isub-agent-shell-models-file
+      (expand-file-name "subagents/agent-shell-models.eld" pai-directory)))
+
+(defun pai-isub-agent-shell--models-alist ()
+  "Return the remembered harness models, reading the file the first time."
+  (when (eq pai-isub-agent-shell--models 'unloaded)
+    (setq pai-isub-agent-shell--models
+          (let ((file (pai-isub-agent-shell--models-file)))
+            (and (file-readable-p file)
+                 (condition-case nil
+                     (with-temp-buffer
+                       (insert-file-contents file)
+                       (let ((data (read (current-buffer))))
+                         (and (listp data) data)))
+                   (error nil))))))
+  pai-isub-agent-shell--models)
+
+(defun pai-isub-agent-shell-remember-models (harness models)
+  "Remember MODELS, a list of (MODEL-ID . NAME), as what HARNESS offers.
+Writes the file only when something changed."
+  (let ((harness (pai-isub-agent-shell--id-name harness))
+        (alist (pai-isub-agent-shell--models-alist)))
+    (when (and harness models
+               (not (equal (cdr (assoc harness alist)) models)))
+      (setq pai-isub-agent-shell--models
+            (cons (cons harness models) (assoc-delete-all harness (copy-sequence alist))))
+      (let ((file (pai-isub-agent-shell--models-file)))
+        (condition-case err
+            (progn
+              (make-directory (file-name-directory file) t)
+              (with-temp-file file
+                (let ((print-length nil) (print-level nil))
+                  (insert ";; agent-shell harness models seen by pai subagents\n")
+                  (prin1 pai-isub-agent-shell--models (current-buffer))
+                  (insert "\n"))))
+          (error (message "pai-isub: cannot save %s: %s" file
+                          (error-message-string err))))))
+    models))
+
+(defun pai-isub-agent-shell--buffer-models (buffer)
+  "Return (HARNESS . MODELS) offered in agent-shell BUFFER, or nil."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (let* ((state (and (boundp 'agent-shell--state) agent-shell--state))
+             (harness (and state (pai-isub-agent-shell--id-name
+                                  (map-nested-elt state '(:agent-config :identifier)))))
+             (models (and harness
+                          (ignore-errors (agent-shell--get-available-models state)))))
+        (when models
+          (cons harness
+                (delq nil (mapcar (lambda (m)
+                                    (let ((id (map-elt m :model-id)))
+                                      (and id (cons (format "%s" id)
+                                                    (or (map-elt m :name) "")))))
+                                  models))))))))
+
+(defun pai-isub-agent-shell-scan-models ()
+  "Remember the models of every live agent-shell session."
+  (when (and (featurep 'agent-shell) (fboundp 'agent-shell-buffers))
+    (dolist (buffer (ignore-errors (agent-shell-buffers)))
+      (let ((found (pai-isub-agent-shell--buffer-models buffer)))
+        (when (cdr found)
+          (pai-isub-agent-shell-remember-models (car found) (cdr found)))))))
+
+(defun pai-isub-agent-shell-models (harness)
+  "Return the models known for HARNESS as a list of (MODEL-ID . NAME).
+From live sessions and earlier ones, plus the harness's configured default."
+  (pai-isub-agent-shell-scan-models)
+  (let* ((harness (pai-isub-agent-shell--id-name harness))
+         (models (copy-sequence
+                  (cdr (assoc harness (pai-isub-agent-shell--models-alist)))))
+         (fn (and harness (map-elt (pai-isub-agent-shell-config harness) :default-model-id)))
+         (default (and (functionp fn) (ignore-errors (funcall fn)))))
+    (when (and (stringp default) (not (string-empty-p default))
+               (not (assoc default models)))
+      (setq models (append models (list (cons default "configured default")))))
+    models))
+
+(defun pai-isub-agent-shell-read-model (harness &optional current)
+  "Read one of HARNESS's model ids; empty means the harness default.
+Known models are offered, but any id is accepted.  CURRENT is the initial
+choice.  Return the id or nil."
+  (let* ((models (pai-isub-agent-shell-models harness))
+         (completion-extra-properties
+          (list :annotation-function
+                (lambda (c) (let ((name (cdr (assoc c models))))
+                              (and name (not (string-empty-p name))
+                                   (concat "  " name))))))
+         (choice (string-trim
+                  (completing-read
+                   (format "%s model (empty = its default%s): " harness
+                           (if models "" "; none seen yet, start one to list them"))
+                   (cons "default" (mapcar #'car models)) nil nil nil nil
+                   (or current "default")))))
+    (unless (member choice '("" "default")) choice)))
+
+(defun pai-isub-agent-shell-read-harness (&optional current)
+  "Read an agent-shell harness, offering \"inherit\" (the default) too.
+CURRENT is the initial choice.  Return the identifier or nil for inherit."
+  (let* ((agents (pai-isub-agent-shell-agent-names))
+         (choice (completing-read "agent-shell harness (inherit = default): "
+                                  (cons "inherit" agents) nil (and agents t) nil nil
+                                  (or current "inherit"))))
+    (pai-isub--nonempty choice)))
 
 ;;;; First-message preamble
 
@@ -395,6 +516,9 @@ Return non-nil when an answer was sent."
   (let ((data (map-elt event :data)))
     (pcase (map-elt event :event)
       ('init-finished
+       (let ((found (pai-isub-agent-shell--buffer-models (plist-get handle :buffer))))
+         (when (cdr found)
+           (ignore-errors (pai-isub-agent-shell-remember-models (car found) (cdr found)))))
        (pai-isub-agent-shell--apply-thinking handle))
       ('input-submitted
        (plist-put handle :busy t)
@@ -537,8 +661,9 @@ Runs from a timer so agent-shell finishes its own event handling first."
   (let* ((parent (plist-get spec :parent))
          (options (plist-get spec :backend-options))
          (agent (or (pai-isub-agent-shell--id-name (plist-get options :agent))
-                    (pai-isub-agent-shell--default-agent parent)
-                    (error "No agent-shell agent configured; set one with /subagents-model-backend")))
+                    (and (buffer-live-p parent)
+                         (with-current-buffer parent (pai-isub-default-harness)))
+                    (error "No agent-shell agent configured; pick a harness with /subagents-harness")))
          (agent-model (plist-get options :agent-model))
          (cwd (file-name-as-directory
                (expand-file-name (or (plist-get spec :cwd) default-directory))))
@@ -641,6 +766,7 @@ Runs from a timer so agent-shell finishes its own event handling first."
 (pai-isub-register-backend
  (list :name pai-isub-agent-shell-name
        :label "agent-shell (external ACP agent)"
+       :own-model t
        :start #'pai-isub-agent-shell-start
        :send #'pai-isub-agent-shell-send
        :busy-p #'pai-isub-agent-shell-busy-p

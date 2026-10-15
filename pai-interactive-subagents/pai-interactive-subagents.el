@@ -15,7 +15,9 @@
 ;; How a session is created and driven is a pluggable BACKEND (see
 ;; `pai-isub-backend'): "pai" (a pai chat buffer) and "agent-shell" (an
 ;; external ACP agent in an `agent-shell' buffer) ship here.  The backend is
-;; chosen per run, per role, or per model (`/subagents-model-backend').
+;; chosen per run or per role.  An agent-shell role runs a HARNESS (Claude
+;; Code, Gemini CLI, Codex, ...) with that harness's own models, chosen with
+;; `/subagents-harness'; pai models only apply to the pai backend.
 
 ;;; Commentary:
 
@@ -25,7 +27,7 @@
 ;; `/subagents*' slash commands, the child-side `/parent' command, and the
 ;; settings screen.
 ;;
-;; The `subagent' tool: {agent, task, id?, action?, model?, backend?, async?,
+;; The `subagent' tool: {agent, task, id?, action?, model?, backend?, harness?, async?,
 ;; context?, max-lines?, timeout?}.  Actions:
 ;;
 ;;   launch (default)  open a new subagent session and give it a task
@@ -188,8 +190,9 @@ WITH-SOURCE appends each role's origin (see `pai-isub-role-source')."
                :task (pai-string-schema "The task (launch) or the message to send (say).")
                :id (pai-string-schema "Subagent id for say/read/stop/close/status (prefix ok; defaults to the newest live session).")
                :action (pai-string-schema "launch (default), say, read, status, stop, close, or list.")
-               :model (pai-string-schema "Model override \"provider/id\" or \"provider/id:thinking\".")
-               :backend (pai-string-schema "Session backend to run the role in: \"pai\" or \"agent-shell\" (default: the one configured for the role or its model).")
+               :model (pai-string-schema "Model override: a pai model \"provider/id[:thinking]\"; in the agent-shell backend, the harness's own model id (\"opus\", optionally \"opus:high\").")
+               :backend (pai-string-schema "Session backend to run the role in: \"pai\" or \"agent-shell\" (default: the one configured for the role).")
+               :harness (pai-string-schema "agent-shell harness (external agent) to run, e.g. \"claude-code\", \"gemini-cli\", \"codex\"; implies backend agent-shell.")
                :async (pai-boolean-schema "Run in background (default true). false keeps the tool call pending until the subagent finishes this turn.")
                :context (pai-string-schema "\"fork\" starts the session with your conversation so far; \"fresh\" starts clean.")
                :max-lines (pai-number-schema "Max output lines returned to you.")
@@ -238,117 +241,108 @@ the same name, so enable one or the other, not both.")
         (list :message (format "Closed %s" (plist-get entry :id)))
       (list :message "No matching subagent"))))
 
+(defun pai-isub--role-runs-in-text (role &optional parent)
+  "Return \"MODEL BACKEND[ :THINKING]\" describing what ROLE runs on.
+PARENT is the parent session's model, for \"inherit\"."
+  (let ((backend (pai-isub-resolve-backend role)))
+    (if (pai-isub-backend-own-model-p backend)
+        (let ((h (pai-isub-resolve-harness role)))
+          (format "%-28s %s%s"
+                  (format "%s/%s" (or (plist-get h :harness) "(no harness)")
+                          (or (plist-get h :model) "default"))
+                  backend
+                  (if (plist-get h :thinking) (format " :%s" (plist-get h :thinking)) "")))
+      (let ((resolved (pai-isub-resolve-model role nil parent)))
+        (format "%-28s %s%s"
+                (if resolved (pai-model-key (car resolved)) "(unresolved)")
+                backend
+                (if (and resolved (cadr resolved)) (format " :%s" (cadr resolved)) ""))))))
+
 (defun pai-isub-models-command (args _ctx)
-  "Handler for `/subagents-models [role]': show the live role-model mapping."
+  "Handler for `/subagents-models [role]': show the live role-model mapping.
+agent-shell roles show HARNESS/MODEL instead of a pai model."
   (let* ((role (string-trim args))
          (parent (and (boundp 'pai--model) pai--model))
          (names (if (string-empty-p role) (pai-isub-role-names) (list role))))
     (list :message
-          (string-join
-           (mapcar (lambda (name)
-                     (let* ((resolved (pai-isub-resolve-model name nil parent))
-                            (backend (pai-isub-resolve-backend name nil (car resolved)))
-                            (options (pai-isub-backend-options backend (car resolved))))
-                       (format "%-16s %-28s %s" name
-                               (if resolved (pai-model-key (car resolved)) "(unresolved)")
-                               (format "%s%s%s"
-                                       backend
-                                       (if (plist-get options :agent)
-                                           (format " [%s%s]" (plist-get options :agent)
-                                                   (if (plist-get options :agent-model)
-                                                       (format "/%s" (plist-get options :agent-model))
-                                                     ""))
-                                         "")
-                                       (if (and resolved (cadr resolved))
-                                           (format " :%s" (cadr resolved)) "")))))
-                   names)
-           "\n"))))
+          (mapconcat (lambda (name)
+                       (format "%-16s %s" name (pai-isub--role-runs-in-text name parent)))
+                     names "\n"))))
+
+(defun pai-isub--read-role (args)
+  "Return the role named in ARGS, or read one."
+  (let ((role (string-trim (or args ""))))
+    (if (string-empty-p role)
+        (completing-read "Role: " (pai-isub-role-names) nil t)
+      role)))
+
+(defun pai-isub--harness-message (role)
+  "Return a message saying which harness and model ROLE runs."
+  (let ((h (pai-isub-resolve-harness role)))
+    (format "subagent %s runs in agent-shell harness %s, model %s" role
+            (or (plist-get h :harness) "(none: set a default)")
+            (or (plist-get h :model) "default"))))
+
+(defun pai-isub-read-harness-for-role (role)
+  "Read a harness and its model for ROLE; run ROLE there."
+  (let* ((old (pai-isub-resolve-harness role))
+         (harness (pai-isub-agent-shell-read-harness
+                   (plist-get (pai-isub-override role) :harness))))
+    (pai-isub-set-override role :backend pai-isub-agent-shell-name)
+    (pai-isub-set-override role :harness harness)
+    (pai-isub-set-override role :harness-model nil)
+    (let* ((now (pai-isub-resolve-harness role))
+           (effective (plist-get now :harness)))
+      (when effective
+        (pai-isub-set-override
+         role :harness-model
+         (pai-isub-agent-shell-read-model
+          effective (and (equal effective (plist-get old :harness))
+                         (plist-get old :model))))))))
 
 (defun pai-isub-set-model-command (args _ctx)
-  "Handler for `/subagents-model [role]': set the model used for a role."
-  (let* ((role (string-trim args))
-         (role (if (string-empty-p role)
-                   (completing-read "Role: " (pai-isub-role-names) nil t)
-                 role))
-         (spec (completing-read
-                (format "Model for %s (provider/id[:thinking], RET = inherit): " role)
-                (cons "inherit" (pai-model-keys))
-                nil nil nil nil "inherit")))
-    (pai-isub-set-override role :model spec)
-    (list :message (format "subagent %s -> %s" role spec))))
+  "Handler for `/subagents-model [role]': set the model used for a role.
+A role in the agent-shell backend picks among its harness's models."
+  (let* ((role (pai-isub--read-role args))
+         (backend (pai-isub-resolve-backend role)))
+    (if (pai-isub-backend-own-model-p backend)
+        (let* ((h (pai-isub-resolve-harness role))
+               (harness (or (plist-get h :harness)
+                            (user-error "Pick a harness for %s first: /subagents-harness %s"
+                                        role role))))
+          (pai-isub-set-override role :harness-model
+                                 (pai-isub-agent-shell-read-model harness (plist-get h :model)))
+          (list :message (pai-isub--harness-message role)))
+      (let ((spec (completing-read
+                   (format "Model for %s (provider/id[:thinking], RET = inherit): " role)
+                   (cons "inherit" (pai-model-keys))
+                   nil nil nil nil "inherit")))
+        (pai-isub-set-override role :model spec)
+        (list :message (format "subagent %s -> %s" role spec))))))
 
 (defun pai-isub-set-backend-command (args _ctx)
-  "Handler for `/subagents-backend [role]': set the backend used for a role."
-  (let* ((role (string-trim args))
-         (role (if (string-empty-p role)
-                   (completing-read "Role: " (pai-isub-role-names) nil t)
-                 role))
+  "Handler for `/subagents-backend [role]': set the backend used for a role.
+Choosing agent-shell goes on to ask for the harness and its model."
+  (let* ((role (pai-isub--read-role args))
          (backend (completing-read (format "Backend for %s: " role)
                                    (cons "inherit" (pai-isub-backend-names))
                                    nil t)))
     (pai-isub-set-override role :backend backend)
-    (list :message (format "subagent %s runs in backend %s" role
-                           (pai-isub-resolve-backend role)))))
+    (if (pai-isub-backend-own-model-p (pai-isub-resolve-backend role))
+        (progn (when (equal backend pai-isub-agent-shell-name)
+                 (pai-isub-read-harness-for-role role))
+               (list :message (pai-isub--harness-message role)))
+      (list :message (format "subagent %s runs in backend %s" role
+                             (pai-isub-resolve-backend role))))))
 
-(defun pai-isub--model-backends-text ()
-  "Return the per-model backend mapping, one line per model."
-  (let ((entries (pai-isub-model-backends)))
-    (if (null entries)
-        "No per-model backends; every model runs in the role's or default backend."
-      (mapconcat (lambda (e)
-                   (let ((p (cdr e)))
-                     (format "%-32s %s%s%s" (car e) (plist-get p :backend)
-                             (if (plist-get p :agent) (format " agent %s" (plist-get p :agent)) "")
-                             (if (plist-get p :agent-model)
-                                 (format " model %s" (plist-get p :agent-model)) ""))))
-                 entries "\n"))))
-
-(defun pai-isub-read-model-backend (model)
-  "Read a backend entry for MODEL interactively; return the plist or nil.
-nil (backend \"inherit\") removes MODEL's mapping."
-  (let* ((current (pai-isub-model-backend model))
-         (backend (completing-read
-                   (format "Backend for %s (inherit = none): " model)
-                   (cons "inherit" (pai-isub-backend-names)) nil t nil nil
-                   (or (plist-get current :backend) "inherit"))))
-    (cond
-     ((member backend '("" "inherit")) nil)
-     ((equal backend pai-isub-agent-shell-name)
-      (let* ((agents (pai-isub-agent-shell-agent-names))
-             (agent (completing-read
-                     (format "agent-shell agent for %s: " model)
-                     agents nil (and agents t) nil nil
-                     (or (plist-get current :agent) (car agents))))
-             (agent-model (string-trim
-                           (read-string
-                            (format "%s model id (empty = agent default): " agent)
-                            (plist-get current :agent-model)))))
-        (list :backend backend :agent agent
-              :agent-model (unless (string-empty-p agent-model) agent-model))))
-     (t (list :backend backend)))))
-
-(defun pai-isub-model-backend-command (args _ctx)
-  "Handler for `/subagents-model-backend [model]': pick the backend a model runs in.
-With no model and no mappings, prompt for one; `/subagents-model-backend list'
-shows the mapping."
-  (let ((model (string-trim args)))
-    (if (equal model "list")
-        (list :message (pai-isub--model-backends-text))
-      (let* ((model (if (string-empty-p model)
-                        (completing-read "Model: " (pai-model-keys) nil nil)
-                      model))
-             (entry (pai-isub-read-model-backend model)))
-        (pai-isub-set-model-backend model entry)
-        (list :message
-              (if entry
-                  (format "Subagents on %s run in %s%s" model (plist-get entry :backend)
-                          (if (plist-get entry :agent)
-                              (format " (agent %s%s)" (plist-get entry :agent)
-                                      (if (plist-get entry :agent-model)
-                                          (format ", model %s" (plist-get entry :agent-model))
-                                        ""))
-                            ""))
-                (format "Removed the backend mapping for %s" model)))))))
+(defun pai-isub-harness-command (args _ctx)
+  "Handler for `/subagents-harness [role]': run a role in an agent-shell harness.
+Asks for the harness (Claude Code, Gemini CLI, ...) and which of its models
+to use; the role then runs in the agent-shell backend."
+  (let ((role (pai-isub--read-role args)))
+    (pai-isub-agent-shell--require)
+    (pai-isub-read-harness-for-role role)
+    (list :message (pai-isub--harness-message role))))
 
 (defun pai-isub-roles-command (_args _ctx)
   "Handler for `/subagents-roles': list roles with descriptions."
@@ -367,15 +361,19 @@ shows the mapping."
 ;;;; Settings screen
 
 (defun pai-isub--settings-role-items ()
-  "Return one settings row per role: model, thinking level, and backend."
+  "Return one settings row per role: model, thinking level, and backend.
+A role in the agent-shell backend shows its harness and the harness's model
+instead of a pai model."
   (mapcar
    (lambda (role)
      (list
       :key (intern (format ":isub-role-%s" role)) :type 'custom
       :render
       (lambda (refresh)
-        (let ((target (current-buffer))
-              (desc (plist-get (pai-isub-role role) :description)))
+        (let* ((target (current-buffer))
+               (desc (plist-get (pai-isub-role role) :description))
+               (own (pai-isub-backend-own-model-p (pai-isub-role-backend-display role)))
+               (harness (and own (pai-isub-resolve-harness role))))
           (cl-flet ((write (key value)
                       (when (buffer-live-p target)
                         (with-current-buffer target
@@ -387,10 +385,21 @@ shows the mapping."
                    (list
                     (vui-box (vui-text role) :width 18 :align :left)
                     (vui-box (vui-muted (pai-isub-role-source role)) :width 16 :align :left)
-                    (vui-select
-                     :value (pai-isub-role-model-display role)
-                     :options (cons "inherit" (pai-model-keys))
-                     :on-change (lambda (v) (write :model v)))
+                    (if own
+                        (pai-isub--settings-harness-selects
+                         harness
+                         (lambda (v)
+                           (when (buffer-live-p target)
+                             (with-current-buffer target
+                               (pai-isub-set-override role :harness v)
+                               ;; another harness has other models
+                               (pai-isub-set-override role :harness-model nil)))
+                           (funcall refresh))
+                         (lambda (v) (write :harness-model v)))
+                      (vui-select
+                       :value (pai-isub-role-model-display role)
+                       :options (cons "inherit" (pai-model-keys))
+                       :on-change (lambda (v) (write :model v))))
                     (vui-text "think:")
                     (vui-select
                      :value (pai-isub-role-thinking-display role)
@@ -407,55 +416,45 @@ shows the mapping."
                        (concat " " (truncate-string-to-width desc 24 nil nil "…"))))))))))))
    (pai-isub-role-names)))
 
-(defun pai-isub--settings-model-backend-items ()
-  "Return one settings row per mapped model, plus an action to add one."
-  (append
-   (mapcar
-    (lambda (pair)
-      (let ((model (car pair)))
-        (list
-         :key (intern (format ":isub-model-backend-%s" model)) :type 'custom
-         :render
-         (lambda (refresh)
-           (let* ((target (current-buffer))
-                  (entry (with-current-buffer target (pai-isub-model-backend model)))
-                  (shell-p (equal (plist-get entry :backend) pai-isub-agent-shell-name)))
-             (cl-flet ((write (key value)
-                         (when (buffer-live-p target)
-                           (with-current-buffer target
-                             (pai-isub-set-model-backend
-                              model
-                              (and (not (equal value "inherit"))
-                                   (plist-put (copy-sequence entry) key value)))))
-                         (funcall refresh)))
-               (apply
-                #'vui-hstack
-                (delq nil
-                      (list
-                       (vui-box (vui-text model) :width 32 :align :left)
-                       (vui-text "in:")
-                       (vui-select
-                        :value (plist-get entry :backend)
-                        :options (cons "inherit" (pai-isub-backend-names))
-                        :on-change (lambda (v) (write :backend v)))
-                       (when shell-p (vui-text "agent:"))
-                       (when shell-p
-                         (vui-select
-                          :value (or (plist-get entry :agent) "")
-                          :options (pai-isub-agent-shell-agent-names)
-                          :on-change (lambda (v) (write :agent v))))
-                       (when shell-p
-                         (vui-muted (format " model %s"
-                                            (or (plist-get entry :agent-model) "default")))))))))))))
-    (pai-isub-model-backends))
-   (list (list :key :isub-model-backend-add :type 'action
-               :label "Set backend for a model…"
-               :doc "Run subagents on a model in another backend (agent-shell agent and model)"
-               :action (lambda ()
-                         (let ((model (completing-read "Model: " (pai-model-keys) nil nil)))
-                           (unless (string-empty-p model)
-                             (pai-isub-set-model-backend
-                              model (pai-isub-read-model-backend model)))))))))
+(defun pai-isub--other-model (harness)
+  "Read a model id for HARNESS typed by hand; nil when empty."
+  (pai-isub--nonempty
+   (string-trim (read-string (format "%s model id (empty = its default): " harness)))))
+
+(defun pai-isub--harness-model-options (harness)
+  "Return select options for HARNESS's models: default, known ones, other."
+  (append '(("default" . "default"))
+          (mapcar (lambda (m)
+                    (cons (car m)
+                          (if (string-empty-p (or (cdr m) ""))
+                              (car m)
+                            (format "%s (%s)" (car m) (cdr m)))))
+                  (and harness (pai-isub-agent-shell-models harness)))
+          '((other . "other…"))))
+
+(defun pai-isub--settings-harness-selects (resolved on-harness on-model)
+  "Return \"harness: [H] model: [M]\" selects for a RESOLVED harness plist.
+ON-HARNESS and ON-MODEL receive the new harness / model id (nil = inherit
+/ default)."
+  (let ((harness (plist-get resolved :harness))
+        (model (plist-get resolved :model)))
+    (vui-hstack
+     (vui-text "harness:")
+     (vui-select
+      :value (or harness "inherit")
+      :options (cons "inherit" (pai-isub-agent-shell-agent-names))
+      :on-change (lambda (v) (funcall on-harness (pai-isub--nonempty v))))
+     (vui-text "model:")
+     (vui-select
+      :value (or model "default")
+      :options (let ((opts (pai-isub--harness-model-options harness)))
+                 (if (or (null model) (assoc model opts))
+                     opts
+                   (append opts (list (cons model model)))))
+      :on-change (lambda (v)
+                   (funcall on-model
+                            (cond ((eq v 'other) (and harness (pai-isub--other-model harness)))
+                                  (t (pai-isub--nonempty v)))))))))
 
 (defun pai-isub--settings-manage-items ()
   "Return dynamic action items for managing role definitions."
@@ -531,10 +530,10 @@ shows the mapping."
                              :description "Set the session backend for a role"
                              :handler #'pai-isub-set-backend-command
                              :arg-completions (lambda (_p) (pai-isub-role-names)))
-   (pai-ext-register-command api "subagents-model-backend"
-                             :description "Run subagents on a model in a backend, e.g. agent-shell (arg: model | list)"
-                             :handler #'pai-isub-model-backend-command
-                             :arg-completions (lambda (_p) (cons "list" (pai-model-keys))))
+   (pai-ext-register-command api "subagents-harness"
+                             :description "Run a role in an agent-shell harness (Claude Code, Gemini CLI, ...) and pick its model"
+                             :handler #'pai-isub-harness-command
+                             :arg-completions (lambda (_p) (pai-isub-role-names)))
    (pai-ext-register-command api "subagents-roles"
                              :description "List available subagent roles"
                              :handler #'pai-isub-roles-command)
@@ -597,12 +596,37 @@ shows the mapping."
    :set (lambda (v) (pai-isub-config-set :allow-nested (if v t :false))))
   (pai-settings-ui-register-item
    'interactive-subagents 'defaults
-   :key :isub-agent-shell-agent :type 'choice :label "agent-shell agent"
-   :doc "Agent for the agent-shell backend when the model has no mapping (inherit = agent-shell's preferred)"
+   :key :isub-agent-shell-agent :type 'choice :label "agent-shell harness"
+   :doc "Harness (external agent) for agent-shell roles that name none (inherit = agent-shell's preferred)"
    :choices (lambda () (cons "inherit" (pai-isub-agent-shell-agent-names)))
    :get (lambda () (or (plist-get (pai-isub-config) :agent-shell-agent) "inherit"))
-   :set (lambda (v) (pai-isub-config-set :agent-shell-agent
-                                         (unless (equal v "inherit") v))))
+   :set (lambda (v)
+          (unless (equal (pai-isub--nonempty v)
+                         (pai-isub--nonempty (plist-get (pai-isub-config) :agent-shell-agent)))
+            ;; another harness has other models
+            (pai-isub-config-set :agent-shell-model nil))
+          (pai-isub-config-set :agent-shell-agent (pai-isub--nonempty v))))
+  (pai-settings-ui-register-item
+   'interactive-subagents 'defaults
+   :key :isub-agent-shell-model :type 'choice :label "agent-shell model"
+   :doc "Model of the default harness (models are listed once a session of it has run)"
+   :choices (lambda ()
+              (let ((current (plist-get (pai-isub-config) :agent-shell-model)))
+                (delete-dups
+                 (append (list "default")
+                         (mapcar #'car (and (pai-isub-default-harness)
+                                            (pai-isub-agent-shell-models
+                                             (pai-isub-default-harness))))
+                         (and current (list current))
+                         (list "other…")))))
+   :get (lambda () (or (plist-get (pai-isub-config) :agent-shell-model) "default"))
+   :set (lambda (v)
+          (pai-isub-config-set
+           :agent-shell-model
+           (if (equal v "other…")
+               (let ((h (pai-isub-default-harness)))
+                 (and h (pai-isub--other-model h)))
+             (pai-isub--nonempty v)))))
   (pai-settings-ui-register-item
    'interactive-subagents 'defaults
    :key :isub-agent-shell-auto-approve :type 'boolean :label "agent-shell auto-approve"
@@ -610,11 +634,7 @@ shows the mapping."
    :get (lambda () (pai-truthy (plist-get (pai-isub-config) :agent-shell-auto-approve)))
    :set (lambda (v) (pai-isub-config-set :agent-shell-auto-approve (if v t :false))))
   (pai-settings-ui-register-subsection
-   'interactive-subagents 'model-backends "Backend per model" 15)
-  (pai-settings-ui-register-dynamic-items
-   'interactive-subagents 'model-backends #'pai-isub--settings-model-backend-items)
-  (pai-settings-ui-register-subsection
-   'interactive-subagents 'roles "Roles (model · thinking · backend)" 20)
+   'interactive-subagents 'roles "Roles (model or harness · thinking · backend)" 20)
   (pai-settings-ui-register-dynamic-items
    'interactive-subagents 'roles #'pai-isub--settings-role-items)
   (pai-settings-ui-register-subsection 'interactive-subagents 'manage "Manage roles" 30)

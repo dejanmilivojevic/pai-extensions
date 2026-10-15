@@ -120,7 +120,7 @@ challenge this plan") — the model calls the tool.
 Slash commands: `/subagents [id]` (list), `/subagents-open [id]` (show its
 buffer), `/subagents-stop [id]`,
 `/subagents-close [id]`, `/subagents-models [role]`, `/subagents-model [role]`,
-`/subagents-backend [role]`, `/subagents-model-backend [model|list]`,
+`/subagents-backend [role]`, `/subagents-harness [role]`,
 `/subagents-roles`, `/subagents-reload`, and — in
 a child buffer — `/parent TEXT`.
 
@@ -128,8 +128,8 @@ a child buffer — `/parent TEXT`.
 `:interactive-subagents` `:overrides` setting → role frontmatter →
 `:default-model` → the parent session model (`inherit`). The settings screen
 (`/menu` → *Interactive subagents*) edits the defaults and one row per role
-(model · thinking · backend); `/subagents-model reviewer` does the same from
-the prompt.
+(model or harness · thinking · backend); `/subagents-model reviewer` does the
+same from the prompt.
 
 **Backends.** How a subagent session is created and driven is pluggable. Two
 ship with the extension: `"pai"` (a pai chat buffer) and `"agent-shell"` (an
@@ -141,25 +141,36 @@ loaded only when needed). Others are plists registered with
 `:transcript`). The child reports upstream through the `:emit` callback it is
 handed (`ready`/`busy`/`turn-end`/`reply`/`status`/`exit`); roles, model
 resolution, delivery into the parent turn and the status block are
-backend-agnostic. Backend resolution: per-run `backend` arg → role override
-(`/subagents-backend`) → `backend:` frontmatter → **the backend configured for
-the resolved model** → `:default-backend` → `"pai"`.
+backend-agnostic. Backend resolution: per-run `backend` arg (or a per-run
+`harness`, which implies agent-shell) → role override (`/subagents-backend`) →
+`backend:` (or `harness:`) frontmatter → `:default-backend` → `"pai"`.
 
-**Backend per model.** `/subagents-model-backend [model]` (or `/menu` →
-*Interactive subagents* → *Backend per model*) pins a model to a backend; for
-agent-shell it also picks the agent and, optionally, the agent's own model id:
+**agent-shell harnesses.** An agent-shell subagent runs an external agent —
+a *harness* such as Claude Code, Gemini CLI or Codex — that brings its own
+models, so pai's models do not apply there. Instead a role picks the harness
+and, optionally, one of that harness's models: `/subagents-harness [role]`
+(or the role's row in `/menu` → *Interactive subagents*, which shows
+*harness* and *model* selects in place of the pai model once the role runs in
+agent-shell). `/subagents-model [role]` on such a role picks among the
+harness's models. Harness models are only known once a session of that
+harness has run, so the models seen in any agent-shell session are remembered
+(`~/.pai/subagents/agent-shell-models.eld`) and offered from then on; any id
+can also be typed by hand ("other…").
 
 ```elisp
 :interactive-subagents
-  (:model-backends (:anthropic/claude-opus-4 (:backend "agent-shell"
-                                             :agent "claude-code"
-                                             :agent-model "opus")))
+  (:overrides (:reviewer (:backend "agent-shell" :harness "claude-code"
+                          :harness-model "opus"))
+   :agent-shell-agent "gemini-cli"     ; default harness
+   :agent-shell-model nil)             ; its model (nil = the harness default)
 ```
 
-Every role resolving to that model then runs in Claude Code on Opus.
-`/subagents-model-backend list` shows the mapping. A role forced into
-agent-shell without a mapping uses the *agent-shell agent* setting
-(`:agent-shell-agent`), then `agent-shell-preferred-agent-config`.
+Per run the model asks with `{"agent": "reviewer", "harness": "codex",
+"model": "gpt-5:high"}`; role files can say `harness: claude-code` and
+`harness-model: opus`. Resolution: per-run → override → frontmatter →
+defaults (*agent-shell harness* / *agent-shell model*, then
+`agent-shell-preferred-agent-config`). A harness model only applies with the
+harness it was chosen for, so switching a role to another harness drops it.
 
 An agent-shell subagent behaves like a pai one:
 
@@ -183,8 +194,8 @@ An agent-shell subagent behaves like a pai one:
 
 **Defining your own roles**: drop a markdown file in `~/.pai/subagents/` (home,
 every instance) or `<project>/.pai/subagents/` (trusted project only). Frontmatter
-keys `name`, `description`, `model`, `thinking`, `backend`, `tools`
-(comma-separated), `context` (`fresh`|`fork`); the body is the role's system
+keys `name`, `description`, `model`, `thinking`, `backend`, `harness`,
+`harness-model`, `tools` (comma-separated), `context` (`fresh`|`fork`); the body is the role's system
 prompt. Example:
 
 ```markdown

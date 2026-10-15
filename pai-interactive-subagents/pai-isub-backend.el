@@ -11,6 +11,9 @@
 ;;
 ;;   (:name       "pai"                  ; unique id used in settings/roles
 ;;    :label      "pai session buffer"   ; shown in the settings screen
+;;    :own-model  nil                    ; t: runs an external agent (a
+;;                                       ; harness) with its own models;
+;;                                       ; pai models do not apply
 ;;    :start      (lambda (SPEC) -> HANDLE)            ; required
 ;;    :send       (lambda (HANDLE TEXT) -> any)        ; required
 ;;    :buffer     (lambda (HANDLE) -> buffer)          ; default: (:buffer HANDLE)
@@ -32,9 +35,11 @@
 ;;   :description  the role's one-line description
 ;;   :parent       the parent chat buffer
 ;;   :cwd          working directory for the child
-;;   :model        resolved model plist (may be nil for backends with own model)
+;;   :model        resolved model plist (nil for :own-model backends)
 ;;   :thinking     resolved thinking level symbol, or nil
 ;;   :context-messages  parent messages to inherit ("fork" context), or nil
+;;   :backend-options   for :own-model backends: (:agent HARNESS
+;;                 :agent-model MODEL), see `pai-isub-resolve-harness'
 ;;   :emit         (lambda (TYPE &rest PROPS)) -- the child's way back home
 ;;
 ;; The backend (or the child session itself) reports upstream through :emit:
@@ -113,6 +118,10 @@ Re-registering a name replaces the previous definition.  Return BACKEND."
 (defun pai-isub-backend-names ()
   "Return the registered backend names, sorted."
   (sort (mapcar #'car pai-isub--backends) #'string-lessp))
+
+(defun pai-isub-backend-own-model-p (name)
+  "Return non-nil when backend NAME runs an agent with its own models."
+  (and (plist-get (pai-isub-backend name) :own-model) t))
 
 (defun pai-isub-backend-label (name)
   "Return a human label for backend NAME."

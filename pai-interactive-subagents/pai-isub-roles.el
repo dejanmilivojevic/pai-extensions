@@ -16,9 +16,11 @@
 ;;   4. settings default:        :default-model
 ;;   5. the parent session's model ("inherit")
 ;;
-;; Backends resolve the same way (per-run arg, override, frontmatter, the
-;; backend configured for the resolved model under :model-backends,
-;; :default-backend, then "pai").
+;; Backends resolve the same way (per-run arg, override, frontmatter,
+;; :default-backend, then "pai"); a harness named at any of those levels
+;; implies the agent-shell backend.  Backends that run their own agent
+;; (agent-shell) ignore pai models: a role picks a harness and, optionally,
+;; one of the harness's models instead (see `pai-isub-resolve-harness').
 ;;
 ;; Settings live under the `:interactive-subagents' key.  Overrides are stored
 ;; as a JSON object keyed by role name so they survive a settings round trip:
@@ -182,6 +184,10 @@ of the same name is listed once)."
                    (list :model (cdr (assoc "model" meta))))
                  (when (cdr (assoc "backend" meta))
                    (list :backend (cdr (assoc "backend" meta))))
+                 (when (cdr (assoc "harness" meta))
+                   (list :harness (cdr (assoc "harness" meta))))
+                 (when (cdr (assoc "harness-model" meta))
+                   (list :harness-model (cdr (assoc "harness-model" meta))))
                  (when (cdr (assoc "thinking" meta))
                    (list :thinking (intern (cdr (assoc "thinking" meta)))))
                  (when (cdr (assoc "tools" meta))
@@ -247,6 +253,8 @@ Project roles override home roles with the same name.  Return their count."
                     "thinking: %s\n"
                     "# model: provider/id      # optional default model for this role\n"
                     "# backend: pai            # session backend to run this role in\n"
+                    "# harness: claude-code    # agent-shell agent (implies backend agent-shell)\n"
+                    "# harness-model: opus     # that agent's model (default: its own)\n"
                     "# tools: bash, read       # optional allowlist\n"
                     "# context: fork           # fresh | fork\n"
                     "---\n\n%s\n")
@@ -289,6 +297,15 @@ re-enabled if it was disabled.  Reloads roles when the buffer is saved."
         (list (match-string 1 spec) (intern (match-string 2 spec)))
       (list spec nil))))
 
+(defun pai-isub-resolve-thinking (role &optional per-run)
+  "Return the thinking level symbol for ROLE, or nil.
+PER-RUN wins, then the settings override, role frontmatter and
+`:default-thinking'."
+  (or (pai-isub--as-symbol per-run)
+      (pai-isub--as-symbol (plist-get (pai-isub-override role) :thinking))
+      (pai-isub--as-symbol (plist-get (pai-isub-role role) :thinking))
+      (pai-isub--as-symbol (plist-get (pai-isub-config) :default-thinking))))
+
 (defun pai-isub-resolve-model (role &optional per-run parent-model)
   "Resolve the model plist and thinking level for ROLE.
 PER-RUN wins, then the settings override, then role frontmatter, then
@@ -302,11 +319,7 @@ PER-RUN wins, then the settings override, then role frontmatter, then
                    (and parent-model "inherit")))
          (parsed (and spec (pai-isub-parse-model-spec spec)))
          (key (car parsed))
-         (thinking (or (cadr parsed)
-                       (pai-isub--as-symbol (plist-get override :thinking))
-                       (pai-isub--as-symbol (plist-get role-def :thinking))
-                       (pai-isub--as-symbol
-                        (plist-get (pai-isub-config) :default-thinking))))
+         (thinking (pai-isub-resolve-thinking role (cadr parsed)))
          (model (pcase key
                   ((or "inherit" `nil "") parent-model)
                   (_ (or (pai-model key)
@@ -316,77 +329,102 @@ PER-RUN wins, then the settings override, then role frontmatter, then
     (when (or (memq thinking pai-isub-thinking-levels) (null thinking))
       (and model (list model thinking)))))
 
-;;;; Per-model backends
+;;;; Harnesses
 ;;
-;; A model can be pinned to a backend: whenever a subagent resolves to that
-;; model it runs there unless the run or its role names a backend
-;; explicitly.  The entry also carries backend options -- for `agent-shell',
-;; which agent to start and which of its models to select:
+;; A backend flagged `:own-model' (agent-shell) runs an external agent --
+;; a HARNESS such as Claude Code, Gemini CLI or Codex -- that brings its own
+;; models, so pai's models mean nothing there.  Such a role is configured
+;; with the harness to start and, optionally, which of the harness's models
+;; to select instead:
 ;;
-;;   :model-backends (:anthropic/claude-opus-4 (:backend "agent-shell"
-;;                                              :agent "claude-code"
-;;                                              :agent-model "opus"))
+;;   per run:    {"harness": "claude-code", "model": "opus"}
+;;   override:   :overrides (:reviewer (:harness "claude-code" :harness-model "opus"))
+;;   frontmatter: harness: claude-code / harness-model: opus
+;;   defaults:   :agent-shell-agent "claude-code" :agent-shell-model "opus",
+;;               then `agent-shell-preferred-agent-config'
+;;
+;; A harness model only applies with the harness it was chosen for: a model
+;; set next to another harness (or a default model next to another default
+;; harness) is ignored.
 
-(defun pai-isub--model-key-of (model)
-  "Return the key string of MODEL (a model plist or a key string), or nil."
-  (cond ((stringp model) (unless (string-empty-p model) model))
-        ((and model (listp model)) (pai-model-key model))))
+(defvar agent-shell-preferred-agent-config)
 
-(defun pai-isub-model-backends ()
-  "Return the configured model -> backend entries as ((KEY . PLIST) ...)."
-  (let ((plist (plist-get (pai-isub-config) :model-backends))
-        out)
-    (while plist
-      (let ((k (pop plist)) (v (pop plist)))
-        (when (and (keywordp k) (plist-get v :backend))
-          (push (cons (substring (symbol-name k) 1) v) out))))
-    (sort out (lambda (a b) (string-lessp (car a) (car b))))))
+(defconst pai-isub-harness-backend "agent-shell"
+  "Backend a harness setting implies when no backend is named.")
 
-(defun pai-isub-model-backend (model)
-  "Return the backend entry plist configured for MODEL, or nil.
-MODEL is a model plist or a \"provider/id\" key."
-  (let ((key (pai-isub--model-key-of model)))
-    (and key (cdr (assoc key (pai-isub-model-backends))))))
+(defun pai-isub--nonempty (value)
+  "Return VALUE as a non-empty string, or nil (also for \"inherit\"/\"default\")."
+  (let ((s (cond ((null value) nil)
+                 ((stringp value) value)
+                 ((symbolp value) (symbol-name value))
+                 (t (format "%s" value)))))
+    (unless (or (null s) (member s '("" "inherit" "default"))) s)))
 
-(defun pai-isub-set-model-backend (model entry)
-  "Configure MODEL (a key or plist) to run in the backend described by ENTRY.
-ENTRY is a plist (:backend NAME [:agent ID :agent-model ID]); nil, or a
-:backend of nil/\"\"/\"inherit\", removes the mapping.  Return ENTRY."
-  (let* ((key (or (pai-isub--model-key-of model) (error "No model given")))
-         (kw (intern (concat ":" key)))
-         (backend (plist-get entry :backend))
-         (clear (or (null backend) (member backend '("" "inherit"))))
-         (old (copy-sequence (plist-get (pai-isub-config) :model-backends)))
-         (new nil))
-    ;; rebuild without KEY, then append the new entry
-    (while old
-      (let ((k (pop old)) (v (pop old)))
-        (unless (eq k kw) (setq new (append new (list k v))))))
-    (unless clear
-      (setq new (append new (list kw (cl-loop for (k v) on entry by #'cddr
-                                              when (and v (not (equal v "")))
-                                              append (list k v))))))
-    (pai-isub-config-set :model-backends new)
-    entry))
+(defun pai-isub-default-harness ()
+  "Return the harness used when a role names none, or nil.
+The `:agent-shell-agent' setting, then `agent-shell-preferred-agent-config'."
+  (or (pai-isub--nonempty (plist-get (pai-isub-config) :agent-shell-agent))
+      (let ((pref (bound-and-true-p agent-shell-preferred-agent-config)))
+        (cond ((symbolp pref) (pai-isub--nonempty pref))
+              ((and (consp pref) (symbolp (cdr pref))) (pai-isub--nonempty (cdr pref)))
+              ((consp pref) (pai-isub--nonempty (alist-get :identifier pref)))))))
 
-(defun pai-isub-resolve-backend (role &optional per-run model)
+(defun pai-isub-resolve-harness (role &optional per-run-harness per-run-model)
+  "Resolve the harness, harness model and thinking level for ROLE.
+PER-RUN-HARNESS and PER-RUN-MODEL (\"id\" or \"id:thinking\") win, then
+the settings override, role frontmatter and the defaults.  Return the plist
+\(:harness H :model M :thinking T); H is nil when nothing names a harness."
+  (let* ((override (pai-isub-override role))
+         (role-def (pai-isub-role role))
+         (config (pai-isub-config))
+         (parsed (and (pai-isub--nonempty per-run-model)
+                      (pai-isub-parse-model-spec per-run-model)))
+         (default (pai-isub-default-harness))
+         ;; (HARNESS MODEL) per layer, strongest first
+         (layers (list (list (pai-isub--nonempty per-run-harness)
+                             (pai-isub--nonempty (car parsed)))
+                       (list (pai-isub--nonempty (plist-get override :harness))
+                             (pai-isub--nonempty (plist-get override :harness-model)))
+                       (list (pai-isub--nonempty (plist-get role-def :harness))
+                             (pai-isub--nonempty (plist-get role-def :harness-model)))
+                       (list default
+                             (pai-isub--nonempty (plist-get config :agent-shell-model)))))
+         (harness (seq-some #'car layers))
+         (model (seq-some (lambda (layer)
+                            (and (cadr layer)
+                                 (or (null (car layer)) (equal (car layer) harness))
+                                 (cadr layer)))
+                          layers)))
+    (list :harness harness :model model
+          :thinking (pai-isub-resolve-thinking role (cadr parsed)))))
+
+(defun pai-isub-resolve-backend (role &optional per-run per-run-harness)
   "Return the backend name to run ROLE in.
-PER-RUN wins, then the role's settings override, then role frontmatter, then
-the backend configured for MODEL (the resolved model, see
-`pai-isub-model-backend'), then `:default-backend', then \"pai\"."
-  (or per-run
-      (plist-get (pai-isub-override role) :backend)
-      (plist-get (pai-isub-role role) :backend)
-      (plist-get (pai-isub-model-backend model) :backend)
-      (plist-get (pai-isub-config) :default-backend)
-      "pai"))
+PER-RUN wins; a PER-RUN-HARNESS implies `pai-isub-harness-backend'; then the
+role's settings override and frontmatter (a backend, or else a harness,
+which implies the harness backend), then `:default-backend', then \"pai\"."
+  (let ((override (pai-isub-override role))
+        (role-def (pai-isub-role role)))
+    (or (pai-isub--nonempty per-run)
+        (and (pai-isub--nonempty per-run-harness) pai-isub-harness-backend)
+        (pai-isub--nonempty (plist-get override :backend))
+        (and (pai-isub--nonempty (plist-get override :harness)) pai-isub-harness-backend)
+        (pai-isub--nonempty (plist-get role-def :backend))
+        (and (pai-isub--nonempty (plist-get role-def :harness)) pai-isub-harness-backend)
+        (pai-isub--nonempty (plist-get (pai-isub-config) :default-backend))
+        "pai")))
 
-(defun pai-isub-backend-options (backend model)
-  "Return the options for BACKEND configured for MODEL, or nil.
-Only when MODEL's mapping names BACKEND: a role forced into another backend
-does not pick up options meant for this one."
-  (let ((entry (pai-isub-model-backend model)))
-    (and (equal (plist-get entry :backend) backend) entry)))
+(defun pai-isub-set-harness (role harness &optional model)
+  "Run ROLE in HARNESS with the harness's MODEL (nil = the harness default).
+A nil or \"inherit\" HARNESS clears the role's harness.  A harness also
+pins ROLE to `pai-isub-harness-backend' unless it is already there."
+  (let ((harness (pai-isub--nonempty harness)))
+    (pai-isub-set-override role :harness harness)
+    (pai-isub-set-override role :harness-model (and harness (pai-isub--nonempty model)))
+    (when (and harness
+               (not (equal (pai-isub-resolve-backend role) pai-isub-harness-backend)))
+      (pai-isub-set-override role :backend pai-isub-harness-backend))
+    harness))
 
 (defun pai-isub-role-context-mode (role &optional per-run)
   "Return the context mode symbol (`fresh' or `fork') for ROLE.
@@ -412,7 +450,7 @@ The `:allow-nested' setting wins; otherwise `pai-isub-allow-nested' applies."
 ;;;; Display helpers (settings screen)
 
 (defun pai-isub-role-model-display (role)
-  "Return the effective model spec to show for ROLE."
+  "Return the effective pai model spec to show for ROLE."
   (or (plist-get (pai-isub-override role) :model)
       (plist-get (pai-isub-role role) :model)
       (plist-get (pai-isub-config) :default-model)
@@ -420,16 +458,18 @@ The `:allow-nested' setting wins; otherwise `pai-isub-allow-nested' applies."
 
 (defun pai-isub-role-thinking-display (role)
   "Return the effective thinking level to show for ROLE."
-  (let ((v (or (pai-isub--as-symbol (plist-get (pai-isub-override role) :thinking))
-               (pai-isub--as-symbol (plist-get (pai-isub-role role) :thinking))
-               (pai-isub--as-symbol (plist-get (pai-isub-config) :default-thinking)))))
+  (let ((v (pai-isub-resolve-thinking role)))
     (if v (symbol-name v) "inherit")))
 
 (defun pai-isub-role-backend-display (role)
   "Return the effective backend name to show for ROLE."
-  (pai-isub-resolve-backend
-   role nil (car (ignore-errors
-                   (pai-isub-resolve-model role nil (bound-and-true-p pai--model))))))
+  (pai-isub-resolve-backend role))
+
+(defun pai-isub-role-harness-display (role)
+  "Return (HARNESS . MODEL) to show for ROLE; \"default\" for what is unset."
+  (let ((r (pai-isub-resolve-harness role)))
+    (cons (or (plist-get r :harness) "default")
+          (or (plist-get r :model) "default"))))
 
 (provide 'pai-isub-roles)
 ;;; pai-isub-roles.el ends here

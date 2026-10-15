@@ -498,22 +498,30 @@ continuation of a foreground (async false) call, or nil."
          (role-def (pai-isub-role role)))
     (unless role-def
       (error "Unknown subagent role %s; see /subagents-roles" role))
-    (let* ((resolved (pai-isub-resolve-model role (plist-get args :model)
-                                             (plist-get ctx :model)))
-           (backend-name (pai-isub-resolve-backend role (plist-get args :backend)
-                                                   (car resolved)))
+    (let* ((backend-name (pai-isub-resolve-backend role (plist-get args :backend)
+                                                   (plist-get args :harness)))
            (backend (pai-isub-backend backend-name))
-           (options (pai-isub-backend-options backend-name (car resolved)))
+           (own (pai-isub-backend-own-model-p backend-name))
+           ;; a backend running its own agent takes a harness and that
+           ;; harness's model; pai's models only apply to the others
+           (harness (and own (pai-isub-resolve-harness
+                              role (plist-get args :harness) (plist-get args :model))))
+           (resolved (if own
+                         (and harness (list nil (plist-get harness :thinking)))
+                       (pai-isub-resolve-model role (plist-get args :model)
+                                               (plist-get ctx :model))))
+           (options (and harness (list :agent (plist-get harness :harness)
+                                       :agent-model (plist-get harness :model))))
            (context-mode (pai-isub-role-context-mode role (plist-get args :context)))
            (id (format "sub-%d" (cl-incf pai-isub--counter))))
       (unless backend
         (error "Unknown subagent backend %s; known: %s" backend-name
                (string-join (pai-isub-backend-names) ", ")))
-      (unless (or resolved (not (equal backend-name "pai")))
+      (unless (or resolved own (not (equal backend-name "pai")))
         (error "No model resolved for role %s; set one with /subagents-model" role))
       (let ((entry (list :id id :role role :backend backend-name :handle nil
                          :task task :status "starting"
-                         :model (and resolved (pai-model-key (car resolved)))
+                         :model (and (car resolved) (pai-model-key (car resolved)))
                          :thinking (and resolved (cadr resolved))
                          :parent parent :on-done on-done :awaiting t
                          :started (float-time) :ended nil :last-output nil

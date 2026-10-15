@@ -908,65 +908,102 @@
       (delete-directory home t)
       (delete-directory project t))))
 
-;;;; Per-model backends
+;;;; Harnesses (backends running their own agent)
 
-(ert-deftest pai-isub-model-backend-mapping-round-trips ()
-  "A model's backend entry persists through JSON and can be removed."
+(defvar agent-shell-preferred-agent-config)
+(defvar agent-shell--state)
+
+(ert-deftest pai-isub-harness-resolution-precedence ()
+  "Per-run > override > frontmatter > default, and a harness model only
+applies with the harness it was chosen for."
   (let ((buf (pai-isub-test--setup)))
     (unwind-protect
         (with-current-buffer buf
           (cl-letf (((symbol-function 'pai-settings-save) (lambda (&rest _) nil)))
-            (pai-isub-set-model-backend "faux/faux" (list :backend "agent-shell"
-                                                          :agent "claude-code"
-                                                          :agent-model ""))
-            (pai-isub-set-model-backend "other/x:free" (list :backend "pai"))
+            (let ((agent-shell-preferred-agent-config nil))
+              ;; nothing configured
+              (should-not (plist-get (pai-isub-resolve-harness "scout") :harness))
+              ;; agent-shell's preferred agent is the last resort
+              (let ((agent-shell-preferred-agent-config 'codex))
+                (should (equal (plist-get (pai-isub-resolve-harness "scout") :harness) "codex")))
+              (pai-isub-config-set :agent-shell-agent "gemini-cli")
+              (pai-isub-config-set :agent-shell-model "gemini-2.5-pro")
+              (should (equal (pai-isub-resolve-harness "scout")
+                             '(:harness "gemini-cli" :model "gemini-2.5-pro" :thinking low)))
+              ;; a role's harness: the default model belongs to another harness
+              (pai-isub-set-override "scout" :harness "claude-code")
+              (should (equal (plist-get (pai-isub-resolve-harness "scout") :harness) "claude-code"))
+              (should-not (plist-get (pai-isub-resolve-harness "scout") :model))
+              (pai-isub-set-override "scout" :harness-model "opus")
+              (should (equal (plist-get (pai-isub-resolve-harness "scout") :model) "opus"))
+              ;; per run: harness and model, with a thinking suffix
+              (should (equal (pai-isub-resolve-harness "scout" nil "sonnet:high")
+                             '(:harness "claude-code" :model "sonnet" :thinking high)))
+              (let ((r (pai-isub-resolve-harness "scout" "codex")))
+                (should (equal (plist-get r :harness) "codex"))
+                (should-not (plist-get r :model)))
+              ;; "inherit"/"default" clear
+              (pai-isub-set-override "scout" :harness "inherit")
+              (should (equal (plist-get (pai-isub-resolve-harness "scout") :harness) "gemini-cli"))
+              ;; the role's model (set without a harness) applies to the default one
+              (should (equal (plist-get (pai-isub-resolve-harness "scout") :model) "opus")))))
+      (pai-isub-test--teardown buf))))
+
+(ert-deftest pai-isub-harness-implies-agent-shell-backend ()
+  "Naming a harness runs the role in agent-shell; pai models do not matter."
+  (let ((buf (pai-isub-test--setup)))
+    (unwind-protect
+        (with-current-buffer buf
+          (cl-letf (((symbol-function 'pai-settings-save) (lambda (&rest _) nil)))
+            (should (equal (pai-isub-resolve-backend "scout") "mock"))
+            (should (equal (pai-isub-resolve-backend "scout" nil "claude-code") "agent-shell"))
+            (should (equal (pai-isub-resolve-backend "scout" "pai" "claude-code") "pai"))
+            (pai-isub-set-harness "scout" "claude-code" "opus")
+            (should (equal (pai-isub-resolve-backend "scout") "agent-shell"))
+            (should (equal (pai-isub-role-harness-display "scout") '("claude-code" . "opus")))
+            ;; an explicit backend override beats the harness
+            (pai-isub-set-override "scout" :backend "pai")
+            (should (equal (pai-isub-resolve-backend "scout") "pai"))
+            (should (string-match-p "faux/faux +pai"
+                                    (plist-get (pai-isub-models-command "scout" nil) :message)))
+            (pai-isub-set-override "scout" :backend "agent-shell")
+            (should (string-match-p "claude-code/opus +agent-shell :low"
+                                    (plist-get (pai-isub-models-command "scout" nil) :message)))
+            ;; settings round trip
             (let* ((json (pai-json-encode (list pai-isub-settings-key (pai-isub-config))))
                    (back (pai-json-decode json)))
               (setq-local pai-settings--project back))
-            (should (equal (pai-isub-model-backend pai--model)
-                           '(:backend "agent-shell" :agent "claude-code")))
-            (should (equal (plist-get (pai-isub-model-backend "other/x:free") :backend) "pai"))
-            (should (equal (mapcar #'car (pai-isub-model-backends))
-                           '("faux/faux" "other/x:free")))
-            ;; "inherit" removes the mapping, others stay
-            (pai-isub-set-model-backend "faux/faux" (list :backend "inherit"))
-            (should-not (pai-isub-model-backend "faux/faux"))
-            (should (pai-isub-model-backend "other/x:free"))))
+            (should (equal (pai-isub-resolve-harness "scout")
+                           '(:harness "claude-code" :model "opus" :thinking low)))))
       (pai-isub-test--teardown buf))))
 
-(ert-deftest pai-isub-model-backend-precedence ()
-  "The model's backend beats the default, but not a per-run or role choice."
+(ert-deftest pai-isub-role-file-harness ()
+  "Role frontmatter can name a harness and its model."
+  (let ((buf (pai-isub-test--setup))
+        (dir (make-temp-file "pai-isub-roles" t)))
+    (unwind-protect
+        (with-current-buffer buf
+          (make-directory (expand-file-name "subagents" dir) t)
+          (with-temp-file (expand-file-name "subagents/coder.md" dir)
+            (insert "---\nname: coder\ndescription: Codes\n"
+                    "harness: codex\nharness-model: gpt-5\n---\nYou code."))
+          (let ((pai-directory dir))
+            (pai-isub-load-roles))
+          (should (equal (pai-isub-resolve-backend "coder") "agent-shell"))
+          (should (equal (plist-get (pai-isub-resolve-harness "coder") :model) "gpt-5")))
+      (delete-directory dir t)
+      (pai-isub-test--teardown buf))))
+
+(ert-deftest pai-isub-harness-commands-are-offered ()
+  "`/subagents-harness' is registered and completes role names; the old
+per-model mapping command is gone."
   (let ((buf (pai-isub-test--setup)))
     (unwind-protect
         (with-current-buffer buf
-          (cl-letf (((symbol-function 'pai-settings-save) (lambda (&rest _) nil)))
-            (pai-isub-set-model-backend "faux/faux" (list :backend "agent-shell" :agent "gemini-cli"))
-            (should (equal (pai-isub-resolve-backend "scout" nil pai--model) "agent-shell"))
-            (should (equal (pai-isub-resolve-backend "scout" nil "faux/faux") "agent-shell"))
-            ;; no model: the default backend
-            (should (equal (pai-isub-resolve-backend "scout") "mock"))
-            (should (equal (pai-isub-resolve-backend "scout" "pai" pai--model) "pai"))
-            (pai-isub-set-override "scout" :backend "pai")
-            (should (equal (pai-isub-resolve-backend "scout" nil pai--model) "pai"))
-            ;; options only for the backend the model is mapped to
-            (should (equal (plist-get (pai-isub-backend-options "agent-shell" pai--model) :agent)
-                           "gemini-cli"))
-            (should-not (pai-isub-backend-options "pai" pai--model))))
-      (pai-isub-test--teardown buf))))
-
-(ert-deftest pai-isub-launch-uses-model-backend-and-options ()
-  "A launch on a mapped model runs in its backend with its options."
-  (let ((buf (pai-isub-test--setup '(:default-backend "pai"))))
-    (unwind-protect
-        (pai-isub-test--with-quiet-parent
-          (with-current-buffer buf
-            (cl-letf (((symbol-function 'pai-settings-save) (lambda (&rest _) nil)))
-              (pai-isub-set-model-backend "faux/faux" (list :backend "mock" :agent "a1"))))
-          (pai-isub-test--execute (list :agent "scout" :task "t") buf)
-          (let ((spec (cdr (assq 'start pai-isub-test--events)))
-                (entry (with-current-buffer buf (car pai-isub--runs))))
-            (should (equal (plist-get entry :backend) "mock"))
-            (should (equal (plist-get (plist-get spec :backend-options) :agent) "a1"))))
+          (let ((cmd (gethash "subagents-harness" pai--commands)))
+            (should cmd)
+            (should-not (gethash "subagents-model-backend" pai--commands))
+            (should (member "scout" (funcall (plist-get cmd :arg-completions) "")))))
       (pai-isub-test--teardown buf))))
 
 ;;;; agent-shell backend (agent-shell itself stubbed)
@@ -1023,9 +1060,7 @@ queues while busy, and reports its exit."
           (pai-isub-test--with-fake-agent-shell
             (with-current-buffer buf
               (cl-letf (((symbol-function 'pai-settings-save) (lambda (&rest _) nil)))
-                (pai-isub-set-model-backend "faux/faux" (list :backend "agent-shell"
-                                                              :agent "claude-code"
-                                                              :agent-model "opus"))))
+                (pai-isub-set-harness "scout" "claude-code" "opus")))
             (let* ((res (car (pai-isub-test--execute
                               (list :agent "scout" :task "map the repo") buf)))
                    (entry (with-current-buffer buf (car pai-isub--runs)))
@@ -1101,8 +1136,7 @@ queues while busy, and reports its exit."
            (pai-isub-test--with-fake-agent-shell
              (with-current-buffer buf
                (cl-letf (((symbol-function 'pai-settings-save) (lambda (&rest _) nil)))
-                 (pai-isub-set-model-backend "faux/faux" (list :backend "agent-shell"
-                                                               :agent "claude-code"))))
+                 (pai-isub-set-harness "scout" "claude-code")))
              (pai-isub-test--execute (append (list :agent "scout" :task "go") ,spec-args) buf)
              (let* ((entry (with-current-buffer buf (car pai-isub--runs)))
                     (handle (plist-get entry :handle)))
@@ -1268,19 +1302,82 @@ and a foreground call gets the answer to its own message."
           (should (equal (buffer-string) "PROMPT> half typed"))
           (should-not (plist-get handle :stash)))))))
 
-(ert-deftest pai-isub-model-backend-command-is-offered ()
-  "`/subagents-model-backend' completes \"list\" and model keys."
-  (let ((buf (pai-isub-test--setup)))
+(ert-deftest pai-isub-agent-shell-per-run-harness-and-model ()
+  "A launch naming a harness runs it with the harness's model, not a pai one."
+  (let ((buf (pai-isub-test--setup '(:default-backend "pai"))))
+    (unwind-protect
+        (pai-isub-test--with-quiet-parent
+          (pai-isub-test--with-fake-agent-shell
+            (let ((res (car (pai-isub-test--execute
+                             (list :agent "scout" :task "t" :harness "gemini-cli"
+                                   :model "gemini-2.5-pro:high")
+                             buf))))
+              (should (eq (plist-get res :is-error) :false))
+              (let* ((entry (with-current-buffer buf (car pai-isub--runs)))
+                     (handle (plist-get entry :handle)))
+                (should (equal (plist-get entry :backend) "agent-shell"))
+                (should (equal (plist-get entry :model) "gemini-cli/gemini-2.5-pro"))
+                (should (eq (plist-get handle :thinking) 'high))
+                (should (eq (alist-get :identifier pai-isub-test--shell-config) 'gemini-cli))
+                (should (equal (funcall (alist-get :default-model-id pai-isub-test--shell-config))
+                               "gemini-2.5-pro"))
+                (pai-isub-agent-shell-close handle)))))
+      (pai-isub-test--teardown buf))))
+
+(ert-deftest pai-isub-agent-shell-remembers-harness-models ()
+  "Models a harness offered are kept on disk and offered with its default."
+  (let* ((dir (make-temp-file "pai-isub-models" t))
+         (pai-isub-agent-shell-models-file (expand-file-name "m.eld" dir))
+         (pai-isub-agent-shell--models 'unloaded))
+    (unwind-protect
+        (cl-letf (((symbol-function 'pai-isub-agent-shell-available-p) (lambda () t))
+                  ((symbol-function 'agent-shell--resolved-agent-configs)
+                   (lambda () (list `((:identifier . claude-code)
+                                      (:default-model-id . ,(lambda () "haiku"))))))
+                  ((symbol-function 'agent-shell--get-available-models)
+                   (lambda (state) (map-nested-elt state '(:session :models)))))
+          (with-temp-buffer
+            (setq-local agent-shell--state
+                        '((:agent-config . ((:identifier . claude-code)))
+                          (:session . ((:models . (((:model-id . "opus") (:name . "Opus"))
+                                                   ((:model-id . "sonnet") (:name . "Sonnet"))))))))
+            (let ((found (pai-isub-agent-shell--buffer-models (current-buffer))))
+              (should (equal found '("claude-code" ("opus" . "Opus") ("sonnet" . "Sonnet"))))
+              (pai-isub-agent-shell-remember-models (car found) (cdr found))))
+          (should (file-exists-p pai-isub-agent-shell-models-file))
+          ;; read back from disk
+          (setq pai-isub-agent-shell--models 'unloaded)
+          (should (equal (mapcar #'car (pai-isub-agent-shell-models "claude-code"))
+                         '("opus" "sonnet" "haiku")))
+          (should-not (pai-isub-agent-shell-models "gemini-cli")))
+      (delete-directory dir t))))
+
+(ert-deftest pai-isub-settings-row-shows-harness-for-agent-shell-roles ()
+  "A role in agent-shell shows harness and harness model, not a pai model."
+  (let ((buf (pai-isub-test--setup))
+        (out (generate-new-buffer " *isub-settings-row*")))
     (unwind-protect
         (with-current-buffer buf
-          (let ((cmd (gethash "subagents-model-backend" pai--commands)))
-            (should cmd)
-            (let ((completions (funcall (plist-get cmd :arg-completions) "")))
-              (should (member "list" completions))
-              (should (member "faux/faux" completions))))
-          (should (string-match-p "No per-model backends"
-                                  (plist-get (pai-isub-model-backend-command "list" nil)
-                                             :message))))
+          (cl-letf (((symbol-function 'pai-settings-save) (lambda (&rest _) nil))
+                    ((symbol-function 'pai-isub-agent-shell-available-p) (lambda () t))
+                    ((symbol-function 'agent-shell--resolved-agent-configs)
+                     (lambda () (list '((:identifier . claude-code)) '((:identifier . codex))))))
+            (let ((pai-isub-agent-shell--models '(("claude-code" ("opus" . "Opus")))))
+              (pai-isub-set-harness "scout" "claude-code" "opus")
+              (cl-flet ((row (role)
+                          (let ((item (seq-find (lambda (i) (eq (plist-get i :key)
+                                                               (intern (format ":isub-role-%s" role))))
+                                                (pai-isub--settings-role-items))))
+                            (vui-render (funcall (plist-get item :render) #'ignore) out)
+                            (with-current-buffer out (buffer-string)))))
+                (let ((scout (row "scout")))
+                  (should (string-match-p "harness: \\[claude-code\\] model: \\[opus (Opus)\\]" scout))
+                  (should-not (string-match-p "faux/faux\\|\\[inherit\\] think" scout))
+                  (should (string-match-p "in: \\[agent-shell\\]" scout)))
+                (let ((worker (row "worker")))
+                  (should-not (string-match-p "harness:" worker))
+                  (should (string-match-p "\\[inherit\\] think:" worker)))))))
+      (kill-buffer out)
       (pai-isub-test--teardown buf))))
 
 (provide 'pai-interactive-subagents-test)
