@@ -18,18 +18,54 @@ It does not need OpenCode, bun or Codex.
 
 | Path | Role |
 |---|---|
-| `pai-harness2-batch.el` | Headless rollout: a real pai chat in batch Emacs, recorded as a JSONL event stream |
+| `pai-harness2-batch.el` | One headless rollout: a real pai chat in a child Emacs, recorded as a JSONL event stream |
 | `pai-harness2-hooks.el` | `.pai/hooks.json`: Claude-Code-schema lifecycle hooks dispatched inside pai's tool loop |
-| `bin/pai-harness2-run` | Launcher for one rollout (`--cwd --prompt-file --model --events --timeout …`) |
 | `pai-harness2.el` | `/harness2` command (install, setup, check, demo, run, judge, report, …) |
-| `python/harness2_pai/` | `PaiSubstrate`, the `pai` improver channel, the JobBench launcher, the `harness2-pai` CLI |
+| `python/harness2_pai/` | `PaiSubstrate`, the `pai` improver channel, the JobBench, LAB and WorkBuddy adapters, the `harness2-pai` CLI |
+| `python/harness2_pai/wb_runner/` | The WorkBuddy Harbor agent and harness config `harness2-pai setup wb` installs |
+
+Everything is driven from Emacs. `/harness2` starts each step as an asynchronous
+process in a compilation buffer. When Harness² needs a rollout it starts a child
+Emacs with `emacs -Q --batch -L … -l pai-harness2-batch`. That command line comes
+from your running Emacs (`pai-harness2-batch-command`, the same load path) and
+reaches Harness² through `PAI_HARNESS2_EMACS_ARGV`. No wrapper script and no
+copy of Emacs is involved, so your Emacs never runs a rollout itself and never
+freezes.
+
+## Benchmarks: parity with the OpenCode and Codex cells
+
+| | JobBench (`jb`) | LAB (`lab`) | WorkBuddy-Bench (`wb`) |
+|---|---|---|---|
+| Rollout | child Emacs in a private workspace (task folder + output/) | child Emacs in a scratch workspace (read-only documents/, output/, `scripts/read_doc.py` installed last) | Harbor starts the task container; pai runs **on the host** and works **inside the container over TRAMP** (`/docker:USER@CONTAINER:/workspace/`) |
+| Model | `HARNESS2_PAI_MODEL` (any pai model) | same | the bench proxy's solver route (as for OpenCode, logged by the proxy), or `HARNESS2_PAI_WB_MODEL` |
+| Records | `model_traj/<label>/*.jsonl`, `attempt_index.tsv` | `config.json`, `pai_session.jsonl`, `metrics.json`, `output/` | `agent/pai-events.jsonl`, ATIF `trajectory.json` |
+| Judge / score | upstream | upstream | the verifier's `score.json` (upstream) |
+| Base harness | the Codex cell's AGENTS.md | the Codex cell's AGENTS.md (output/ and read_doc.py rules enforced) | the Codex cell's AGENTS.md |
+
+On WorkBuddy no Emacs is installed into task images and nothing is mounted. pai's
+bash, grep, file tools and hooks run in the container, under its egress control,
+through TRAMP's built-in `docker` method. pai itself makes only the model call,
+from the host. This relies on two core pai changes: tools follow a remote
+working directory, and helper processes such as curl stay local.
+
+The WorkBuddy setup still requires what upstream requires: Docker, and a
+`google-vertex/gemini…` solver route and a `gemini…` judge in the WorkBuddy
+model configs. Set `HARNESS2_SOLVER_MODEL` explicitly for `setup wb`.
+
+Rollouts are refused network access to the hosts that publish the benchmarks'
+data and rubrics (`huggingface.co`, `hf.co`, `github.com`,
+`raw.githubusercontent.com`; see upstream docs/EXPERIMENTS.md, "Web access").
+Any tool call whose arguments name one of them is blocked. Upstream only
+recommends this for the other cells. Override the list with
+`HARNESS2_PAI_DENY_HOSTS` (`none` disables it), and remove tools with
+`HARNESS2_PAI_DENY_TOOLS`.
 
 ### How the harness maps onto pai
 
 | Harness² component | pai file in the rollout workspace |
 |---|---|
 | c1–c4 system prompt, guardrails, memory, tool guidance | `AGENTS.md` (pai's `<project_context>`, always on, cap 16k chars) |
-| c5 subagents `sub_agents/<name>/AGENT.md` | `.pai/subagents/<name>.md` roles (headless `pai-subagents`) |
+| c5 subagents `sub_agents/<name>/AGENT.md` | `.pai/subagents/<name>.md` roles (headless `pai-subagents`; allowed wherever upstream allows them for OpenCode) |
 | c6 skills | `.pai/skills/<name>/SKILL.md` (+ `scripts/`) |
 | c7 scripts | `scripts/<name>.py` |
 | c8 hooks | `.pai/hooks.json` — `PreToolUse`, `PostToolUse`, `SessionStart`, `UserPromptSubmit`, `Stop` |
@@ -68,57 +104,56 @@ by `harness2_pai.substrate.render_events`. Exit status: 0 done, 1 failed,
 In a pai chat (everything runs asynchronously in `*harness2: …*` buffers):
 
 ```
-/harness2 install          # clone Harness² to pai-harness2-directory, uv venv, install both packages
-/harness2 demo             # the ledger demo, every rollout a real pai session (scripted editor)
-/harness2 demo --improver pai   # … and pai edits the harness too
-/harness2 setup jb         # download JobBench (upstream harness2-setup)
-/harness2 check            # preflight the pai cell (no model calls)
+/harness2 install                    # clone Harness² to pai-harness2-directory, uv venv, install both packages
+/harness2 demo                       # the ledger demo, every rollout a real pai session (scripted editor)
+/harness2 demo --improver pai        # … and pai edits the harness too
+/harness2 setup jb                   # or: setup lab, setup wb --subset office
+/harness2 check --bench lab          # preflight a pai cell (no model calls)
 /harness2 run --bench jb --k 1 --mode parallel --max-tasks 1
+/harness2 run --bench wb --subset office --k 1 --max-tasks 1
 /harness2 judge --bench jb --k 1 --mode parallel
 /harness2 report --bench jb --k 1 --mode parallel
-/harness2 runs             # dired the runs directory
-/harness2 render FILE      # a trajectory as the improver sees it
+/harness2 runs                       # dired the runs directory
+/harness2 render FILE                # a trajectory as the improver sees it
 /harness2 status
 ```
 
 Rollouts use the chat's current model unless you set `pai-harness2-model`.
 The other settings are `pai-harness2-improver-model`,
 `pai-harness2-improver-channel` (`pai`, `opencode` or `claude_cli`),
-`pai-harness2-thinking` and `pai-harness2-environment`. Put judge settings
-(e.g. `HARNESS2_JUDGE_MODEL`, `GOOGLE_CLOUD_PROJECT`) in
-`pai-harness2-environment` or in the checkout's `.env`.
+`pai-harness2-thinking` and `pai-harness2-environment` (extra `NAME=value`
+entries: the judge settings such as `HARNESS2_JUDGE_MODEL` and
+`GOOGLE_CLOUD_PROJECT`, `HARNESS2_PAI_WB_MODEL`, `HARNESS2_PAI_DENY_HOSTS`,
+`HARNESS2_RUNS_DIR` …). You can also put the judge settings in the checkout's
+`.env`.
 
-From a shell, inside the Harness² venv:
-
-```bash
-uv pip install -e ~/.pai/extensions/pai-harness2/python
-HARNESS2_PAI_MODEL=anthropic/claude-sonnet-4-6 harness2-pai demo
-HARNESS2_PAI_MODEL=anthropic/claude-sonnet-4-6 harness2-pai run --bench jb --k 1 --max-tasks 1
-```
-
-Environment: `HARNESS2_PAI_MODEL` (falls back to `HARNESS2_SOLVER_MODEL`),
-`HARNESS2_PAI_IMPROVER_MODEL`, `HARNESS2_IMPROVER_CHANNEL`,
-`HARNESS2_PAI_THINKING`, `HARNESS2_PAI_TIMEOUT`, `HARNESS2_PAI_ARGS` (extra
-runner flags), `HARNESS2_PAI_WORKSPACES`, `PAI_HARNESS2_RUNNER`, `PAI_EMACS`,
-`PAI_ROOT`.
+Environment read by the Python side: `HARNESS2_PAI_MODEL` (falls back to
+`HARNESS2_SOLVER_MODEL`), `HARNESS2_PAI_IMPROVER_MODEL`,
+`HARNESS2_IMPROVER_CHANNEL`, `HARNESS2_PAI_THINKING`, `HARNESS2_PAI_TIMEOUT`,
+`HARNESS2_PAI_ARGS` (extra rollout flags), `HARNESS2_PAI_WORKSPACES`,
+`HARNESS2_PAI_LAB_SCRATCH`, `HARNESS2_PAI_WB_MODEL`, `HARNESS2_PAI_DENY_HOSTS`,
+`HARNESS2_PAI_DENY_TOOLS`, `PAI_HARNESS2_EMACS_ARGV` (set by `/harness2`), and
+`PAI_ROOT`/`PAI_EMACS` (its fallback).
 
 ## Scope and limits
 
-- **Benchmarks:** JobBench only for now. LAB and WorkBuddy-Bench need their
-  own launchers; WorkBuddy also needs Emacs and pai inside its Docker image.
-- **Judging** is unchanged upstream code. JobBench's judge still needs its own
-  model endpoint (Vertex by default).
 - **Integration method:** `harness2_pai.register.install()` extends Harness²'s
-  substrate, install-mode, channel and prompt tables at runtime. It checks that
-  every seam exists and fails loudly if an upstream refactor moved one.
-- **Cost:** a rollout's `cost_usd` is pai's priced cost. Models pai has no
-  price for report 0.
+  substrate, install-mode, channel, prompt and WorkBuddy tables at runtime.
+  `harness2-pai setup wb` adds one `pai-harness` entry to WorkBuddy's runtime
+  adapter table. Every seam is checked, so an upstream refactor fails loudly.
+- **WorkBuddy** needs Docker and is tested only with a fake `docker` (TRAMP's
+  docker method against the local machine) and a fake Harbor environment. A
+  real container run still has to happen where Docker is available.
+- **Cost:** a rollout's `cost_usd` is pai's priced cost. Models pai has no price
+  for report 0.
 
 ## Tests
 
 ```bash
 make test                                   # ERT, includes test/pai-harness2-test.el
 cd <harness2 checkout> && .venv/bin/python -m pytest ~/.pai/extensions/pai-harness2/python/tests
+cd <harness2 checkout>/dependencies/workbuddy-bench && \
+  .venv/bin/python -m pytest --noconftest ~/.pai/extensions/pai-harness2/python/tests/test_wb_agent.py
 ```
 
 Both suites run real batch-Emacs rollouts against pai's faux provider. Neither

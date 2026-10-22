@@ -200,10 +200,12 @@ class PaiSubstrate:
         *,
         model: str | None = None,
         final: Path | None = None,
+        rollout: bool = True,
+        endpoint: tuple[str, str] | None = None,
     ) -> list[str]:
-        """The `pai-harness2-run` argv for one rollout in WORKSPACE."""
-        argv = [
-            str(settings.runner()),
+        """The child-Emacs argv for one rollout in WORKSPACE (a local path, or a TRAMP
+        name such as /docker:user@container:/workspace/)."""
+        argv = settings.emacs_argv() + [
             "--cwd",
             str(workspace),
             "--prompt-file",
@@ -221,6 +223,13 @@ class PaiSubstrate:
             argv += ["--thinking", thinking]
         if final is not None:
             argv += ["--final", str(final)]
+        if endpoint is not None:
+            argv += ["--endpoint", endpoint[0], "--endpoint-key", endpoint[1]]
+        if rollout:
+            for host in settings.deny_hosts():
+                argv += ["--deny-host", host]
+            for tool in settings.deny_tools():
+                argv += ["--deny-tool", tool]
         argv += settings.extra_args()
         return argv
 
@@ -234,8 +243,13 @@ class PaiSubstrate:
         log: Path | None = None,
         model: str | None = None,
         final: Path | None = None,
+        rollout: bool = True,
+        env: Mapping[str, str] | None = None,
     ) -> int:
-        """Run one rollout; return the runner's exit status (124 = timeout)."""
+        """Run one rollout; return the runner's exit status (124 = timeout).
+
+        `rollout=False` (improver sessions) skips the benchmark host/tool deny lists.
+        """
         workspace = Path(workspace)
         events = Path(events)
         events.parent.mkdir(parents=True, exist_ok=True)
@@ -243,7 +257,8 @@ class PaiSubstrate:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(prompt)
         argv = self.run_argv(
-            workspace, Path(prompt_path), events, timeout, model=model, final=final
+            workspace, Path(prompt_path), events, timeout, model=model, final=final,
+            rollout=rollout,
         )
         try:
             sink = open(log, "a", encoding="utf-8") if log else subprocess.DEVNULL
@@ -254,7 +269,7 @@ class PaiSubstrate:
                     stdin=subprocess.DEVNULL,
                     stdout=sink,
                     stderr=sink,
-                    env=settings.runner_env(),
+                    env={**settings.runner_env(), **(env or {})},
                     timeout=int(timeout) + settings.GRACE_SECONDS,
                 )
                 return p.returncode
@@ -286,15 +301,11 @@ class PaiSubstrate:
         )
 
     def preflight(self) -> None:
-        """The runner, Emacs and a model must be there; no model call is made."""
-        runner = settings.runner()
-        if not runner.is_file() or not os.access(runner, os.X_OK):
-            raise RuntimeError(
-                f"pai runner missing or not executable: {runner}; set PAI_HARNESS2_RUNNER"
-            )
-        emacs = settings.emacs()
+        """Emacs, pai and a model must be there; no model call is made."""
+        argv = settings.emacs_argv()
+        emacs = argv[0]
         if shutil.which(emacs) is None and not Path(emacs).is_file():
-            raise RuntimeError(f"Emacs not found ({emacs}); set PAI_EMACS")
+            raise RuntimeError(f"Emacs not found ({emacs}); start from /harness2 or set PAI_EMACS")
         if not self.model:
             raise RuntimeError(
                 "No pai executor model: set HARNESS2_PAI_MODEL (a pai model id such as "

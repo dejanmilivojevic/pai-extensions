@@ -29,8 +29,9 @@ from . import settings
 
 _INSTALLED = False
 
-# Supported benchmarks for --substrate pai.
-PAI_BENCHES = ("jb",)
+# Supported benchmarks for --substrate pai: all of Harness²'s.
+PAI_BENCHES = ("jb", "lab", "wb")
+WB_SUBSETS = ("office", "web", "code")
 
 
 def _require(module, *names: str) -> None:
@@ -125,7 +126,8 @@ def _pai_session(self, cwd: Path, mission: str, system: str, wall: int):
     events = events_dir / "events.jsonl"
     try:
         rc = PaiSubstrate(model=self.spec.model).run(
-            prompt, cwd, events, wall, model=self.spec.model, log=events_dir / "runner.log"
+            prompt, cwd, events, wall, model=self.spec.model, log=events_dir / "runner.log",
+            rollout=False,
         )
         cost = run_cost(events)
         ans = out / "answer.md"
@@ -177,11 +179,19 @@ def _install_channel(spec, config, proposer) -> None:
 
 def make_pai_adapter(bench: str, subset: str | None, split_file: Path | None = None):
     if bench not in PAI_BENCHES:
-        raise ValueError(
-            f"--substrate pai supports --bench {', '.join(PAI_BENCHES)} so far, got {bench!r}"
-        )
+        raise ValueError(f"unknown bench {bench!r}; expected one of {PAI_BENCHES}")
+    if bench == "wb":
+        if subset not in WB_SUBSETS:
+            raise ValueError(f"--bench wb needs --subset from {WB_SUBSETS}, got {subset!r}")
+        from .workbuddy import PaiWbAdapter
+
+        return PaiWbAdapter(subset, split_file=split_file)
     if subset:
         raise ValueError(f"--subset applies to --bench wb only, got {subset!r} for {bench}")
+    if bench == "lab":
+        from .lab import PaiLabAdapter
+
+        return PaiLabAdapter(split_file=split_file)
     from .jobbench import PaiJobBenchAdapter
 
     return PaiJobBenchAdapter(split_file=split_file)
@@ -256,6 +266,9 @@ def install() -> None:
     _install_surface_text(prompts)
     _install_channel(spec, config, proposer)
     _install_cli(common, run_sweep)
+    from .workbuddy import install_tables
+
+    install_tables()
     _INSTALLED = True
 
 
@@ -266,8 +279,8 @@ def describe() -> dict:
         "improver_model": settings.improver_model(),
         "improver_channel": settings.improver_channel(),
         "thinking": settings.thinking(),
-        "runner": str(settings.runner()),
-        "emacs": settings.emacs(),
+        "emacs_argv": settings.emacs_argv(),
+        "deny_hosts": settings.deny_hosts(),
         "extra_args": settings.extra_args(),
         "benches": list(PAI_BENCHES),
     }

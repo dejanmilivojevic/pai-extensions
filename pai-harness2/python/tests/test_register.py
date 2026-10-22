@@ -30,8 +30,10 @@ def test_make_adapter_dispatches_pai_and_keeps_upstream():
 
     assert type(C.make_adapter("jb", None, "pai")).__name__ == "PaiJobBenchAdapter"
     assert type(C.make_adapter("jb", None, "cx")).__name__ == "JobBenchAdapter"
-    with pytest.raises(ValueError, match="supports --bench jb"):
-        C.make_adapter("lab", None, "pai")
+    assert type(C.make_adapter("lab", None, "pai")).__name__ == "PaiLabAdapter"
+    assert type(C.make_adapter("wb", "office", "pai")).__name__ == "PaiWbAdapter"
+    with pytest.raises(ValueError, match="needs --subset"):
+        C.make_adapter("wb", None, "pai")
 
 
 def test_paiify_rewrites_codex_paths():

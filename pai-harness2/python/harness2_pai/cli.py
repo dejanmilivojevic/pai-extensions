@@ -3,7 +3,8 @@
     harness2-pai run    --bench jb --k 1 --mode parallel ...   (= harness2 --substrate pai)
     harness2-pai judge  --bench jb --k 1 --mode parallel       (= harness2-judge)
     harness2-pai report --bench jb --k 1 --mode parallel       (= harness2-report)
-    harness2-pai check  --bench jb                             preflight, no model calls
+    harness2-pai setup  jb|lab|wb [--subset S] [--dry-run]     install a benchmark for pai
+    harness2-pai check  --bench jb|lab|wb [--subset S]         preflight, no model calls
     harness2-pai demo   [--output DIR] [--k N] [--improver demo|pai] [--faux FILE]
     harness2-pai render TRAJECTORY.jsonl                       print a rendered trajectory
     harness2-pai status                                        effective configuration
@@ -19,7 +20,7 @@ from pathlib import Path
 
 from . import register
 
-COMMANDS = ("run", "judge", "report", "check", "demo", "render", "status")
+COMMANDS = ("setup", "run", "judge", "report", "check", "demo", "render", "status")
 
 
 def _with_substrate(argv: list[str]) -> list[str]:
@@ -28,16 +29,70 @@ def _with_substrate(argv: list[str]) -> list[str]:
     return [*argv, "--substrate", "pai"]
 
 
+def _setup(argv: list[str]) -> int:
+    """Install a benchmark for the pai cells: the upstream steps minus OpenCode, bun and
+    Codex (pai needs none of them), plus the pai harness for WorkBuddy."""
+    import shutil
+    import subprocess
+
+    p = argparse.ArgumentParser(prog="harness2-pai setup", description=_setup.__doc__)
+    p.add_argument("benchmark", choices=register.PAI_BENCHES)
+    p.add_argument("--subset", choices=register.WB_SUBSETS, default=None)
+    p.add_argument("--dry-run", action="store_true")
+    args = p.parse_args(argv)
+    if args.subset and args.benchmark != "wb":
+        p.error("--subset only applies to wb")
+    from harness2 import config, install
+
+    from .workbuddy import install_assets
+
+    dry = args.dry_run
+    missing = install.missing_runners()
+    if missing and not dry:
+        p.exit(1, f"setup failed: {missing}\n")
+    name = {"jb": "job-bench-eval", "lab": "harvey-labs", "wb": "workbuddy-bench"}[args.benchmark]
+    try:
+        if not dry:
+            for binary in ("git", "uv") + (("docker", "curl") if args.benchmark == "wb" else ()):
+                if not shutil.which(binary):
+                    raise RuntimeError(f"Missing {binary}")
+        install.clone(name, dry_run=dry)
+        install.patch(name, dry_run=dry)
+        install.overlays(name, dry_run=dry)
+        repo = config.DEPENDENCIES / name
+        install.run(["uv", "sync", "--locked", "--python", "3.12"], cwd=repo, dry_run=dry)
+        if args.benchmark == "jb":
+            install.run(["uv", "pip", "install", "--python", repo / ".venv/bin/python",
+                         "python-docx"], dry_run=dry)
+            install.download_jobbench(dry_run=dry)
+        elif args.benchmark == "lab":
+            install.run(["uv", "pip", "install", "--python", repo / ".venv/bin/python",
+                         "google-auth[requests]"], dry_run=dry)
+        else:
+            install.workbuddy_models(dry_run=dry)
+            subsets = [args.subset] if args.subset else list(register.WB_SUBSETS)
+            install.run(["bash", "scripts/dataset/fetch-dataset.sh", *subsets], cwd=repo,
+                        dry_run=dry)
+            for step in install_assets(repo, dry_run=dry):
+                print(step, flush=True)
+    except (OSError, RuntimeError, ValueError, subprocess.CalledProcessError) as exc:
+        p.exit(1, f"setup failed: {exc}\n")
+    print("Setup plan complete." if dry else
+          f"Installed {args.benchmark} for pai. Run /harness2 check --bench {args.benchmark}.")
+    return 0
+
+
 def _check(argv: list[str]) -> int:
     p = argparse.ArgumentParser(prog="harness2-pai check", description="pai cell preflight")
     p.add_argument("--bench", default="jb", choices=register.PAI_BENCHES)
+    p.add_argument("--subset", default=None, choices=register.WB_SUBSETS)
     args = p.parse_args(argv)
     from harness2 import config
     from harness2.cli import _common as C
 
     errors: list[str] = []
     try:
-        adapter = C.make_adapter(args.bench, None, "pai")
+        adapter = C.make_adapter(args.bench, args.subset, "pai")
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"Not ready: {exc}")
         return 1
@@ -142,6 +197,8 @@ def main(argv: list[str] | None = None) -> int:
         return _render(rest)
     if cmd == "check":
         return _check(rest)
+    if cmd == "setup":
+        return _setup(rest)
     if cmd == "demo":
         return _demo(rest)
     if cmd == "run":

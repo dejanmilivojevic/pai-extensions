@@ -131,14 +131,23 @@
       (should (eq (gethash "pai-subagents" exts) :false))
       (should (equal (gethash "model" src) "x/y")))))
 
+(defun pai-harness2-test--command ()
+  "The rollout command line, with the faux provider's test dir on the load path."
+  (let ((cmd (pai-harness2-batch-command)))
+    ;; after `emacs -Q --batch --eval FORM'
+    (append (seq-take cmd 5)
+            (list "-L" (directory-file-name (file-name-directory (locate-library "pai-faux"))))
+            (nthcdr 5 cmd))))
+
 (defun pai-harness2-test--run (dir faux &rest args)
   "Run the launcher in DIR with FAUX responses and ARGS; return (EXIT . EVENTS)."
   (let ((faux-file (expand-file-name "faux.eld" dir))
         (events (expand-file-name "events.jsonl" dir)))
     (with-temp-file faux-file (prin1 faux (current-buffer)))
     (let ((exit (apply #'call-process "timeout" nil nil nil "120"
-                       (expand-file-name "bin/pai-harness2-run" pai-harness2-test--dir)
-                       "--faux" faux-file "--events" events args)))
+                       (append (pai-harness2-test--command)
+                               (list "--faux" faux-file "--events" events)
+                               args))))
       (cons exit
             (with-temp-buffer
               (when (file-exists-p events) (insert-file-contents events))
@@ -226,6 +235,102 @@
                                            "--prompt" "x")))
         (should (eql exit 2))))))
 
+(ert-deftest pai-harness2-batch-endpoint-settings ()
+  (let* ((s (pai-harness2-batch-isolated-settings
+             (make-hash-table :test 'equal) nil nil "endpoint/route-x" "http://127.0.0.1:3456/v1"))
+         (p (aref (gethash "custom-providers" s) 0)))
+    (should (equal (gethash "id" p) "endpoint"))
+    (should (equal (gethash "base-url" p) "http://127.0.0.1:3456/v1"))
+    (should (equal (gethash "api" p) "openai-completions"))
+    (should (equal (gethash "id" (aref (gethash "models" p) 0)) "route-x")))
+  (pai-harness2-test--with-dir dir
+    (pai-harness2-batch-make-home dir (expand-file-name "home" dir) nil nil
+                                  "endpoint/r" "http://x/v1" "trial::r")
+    (let ((auth (pai-harness2-batch--json-file (expand-file-name "home/auth.json" dir))))
+      (should (equal (gethash "key" (gethash "endpoint" auth)) "trial::r"))))
+  (should-error (pai-harness2-batch-parse-args
+                 '("--cwd" "x" "--prompt" "p" "--endpoint" "http://x" "--model" "a/b"))
+                :type 'user-error))
+
+(ert-deftest pai-harness2-batch-host-guard-matching ()
+  (let ((hosts '("huggingface.co" "github.com")))
+    (should (equal (pai-harness2-batch-host-denied
+                    hosts '(:command "curl -s https://huggingface.co/datasets/x"))
+                   "huggingface.co"))
+    (should (equal (pai-harness2-batch-host-denied
+                    hosts '(:command "git clone https://api.github.com/repos"))
+                   "github.com"))
+    (should (pai-harness2-batch-host-denied hosts '(:url "github.com")))
+    (should-not (pai-harness2-batch-host-denied hosts '(:command "echo notgithub.community")))
+    (should-not (pai-harness2-batch-host-denied hosts '(:command "cat github.com.txt.bak")))
+    (should-not (pai-harness2-batch-host-denied hosts '(:command "ls")))))
+
+(ert-deftest pai-harness2-batch-rollout-denies-hosts-and-tools ()
+  (pai-harness2-test--with-dir dir
+    (let ((ws (expand-file-name "ws/" dir)))
+      (make-directory ws t)
+      (pcase-let ((`(,exit . ,events)
+                   (pai-harness2-test--run
+                    dir '((:tool-calls ((:id "c1" :name "bash"
+                                         :arguments (:command "curl https://hf.co/x"))))
+                          (:tool-calls ((:id "c2" :name "ls" :arguments (:path "."))))
+                          (:text "done" :stop-reason stop))
+                    "--cwd" ws "--prompt" "go" "--deny-host" "hf.co" "--deny-tool" "ls")))
+        (should (eql exit 0))
+        (let ((results (pai-harness2-test--of-type "tool_result" events)))
+          (should (string-match-p "Network access to hf.co is not allowed"
+                                  (alist-get 'output (nth 0 results))))
+          (should (eq (alist-get 'is_error (nth 1 results)) t)))))))
+
+(defmacro pai-harness2-test--with-fake-docker (dir &rest body)
+  "Run BODY with a fake `docker' on PATH that runs commands locally."
+  (declare (indent 1))
+  `(pai-harness2-test--with-dir ,dir
+     (let* ((bin (expand-file-name "bin/" ,dir))
+            (process-environment
+             (cons (concat "PATH=" bin path-separator (getenv "PATH")) process-environment))
+            (exec-path (cons bin exec-path)))
+       (pai-harness2-test--write
+        (expand-file-name "docker" bin)
+        (concat "#!/bin/sh\n"
+                "echo \"$@\" >> " (shell-quote-argument (expand-file-name "docker.log" ,dir)) "\n"
+                "[ \"$1\" = exec ] || exit 1; shift\n"
+                "while [ $# -gt 0 ]; do case \"$1\" in -u) shift 2;; -*) shift;; *) break;; esac; done\n"
+                "shift\nexec \"$@\"\n"))
+       (set-file-modes (expand-file-name "docker" bin) #o755)
+       ,@body)))
+
+(ert-deftest pai-harness2-batch-rollout-in-a-container-over-tramp ()
+  "A /docker: workspace: pai reads the harness and runs tools and hooks there."
+  (pai-harness2-test--with-fake-docker dir
+    (let ((ws (expand-file-name "ws/" dir)))
+      (pai-harness2-test--write (expand-file-name "AGENTS.md" ws) "CONTAINER-RULE\n")
+      (pai-harness2-test--write
+       (expand-file-name ".pai/hooks.json" ws)
+       "{\"hooks\": {\"PostToolUse\": [{\"matcher\": \"bash\", \"hooks\": [{\"type\": \"command\",
+          \"command\": \"pwd > hook-ran.txt\"}]}]}}")
+      (pcase-let ((`(,exit . ,events)
+                   (pai-harness2-test--run
+                    dir `((:tool-calls ((:id "c1" :name "bash"
+                                         :arguments (:command "echo made > out.txt; pwd"))))
+                          (:tool-calls ((:id "c2" :name "read"
+                                         :arguments (:path ,(concat ws "out.txt")))))
+                          (:text "done" :stop-reason stop))
+                    "--cwd" (concat "/docker:box:" ws) "--prompt" "go")))
+        (should (eql exit 0))
+        (should (string-match-p "CONTAINER-RULE"
+                                (alist-get 'system_prompt
+                                           (car (pai-harness2-test--of-type "session" events)))))
+        (let ((results (pai-harness2-test--of-type "tool_result" events)))
+          (should (string-match-p (regexp-quote (directory-file-name ws))
+                                  (alist-get 'output (nth 0 results))))
+          (should (string-match-p "made" (alist-get 'output (nth 1 results)))))
+        (should (file-exists-p (expand-file-name "out.txt" ws)))
+        (should (file-exists-p (expand-file-name "hook-ran.txt" ws)))
+        (should (string-match-p "exec" (with-temp-buffer
+                                         (insert-file-contents (expand-file-name "docker.log" dir))
+                                         (buffer-string))))))))
+
 ;;;; Command surface
 
 (ert-deftest pai-harness2-command-is-registered-with-completions ()
@@ -240,6 +345,12 @@
       (should (equal (funcall complete "de") '("demo"))))
     (cl-letf (((symbol-function 'pai-command-arg-words) (lambda () '("setup"))))
       (should (equal (funcall complete "") '("jb" "lab" "wb"))))
+    (cl-letf (((symbol-function 'pai-command-arg-words) (lambda () '("setup" "wb"))))
+      (should (member "--subset" (funcall complete "--"))))
+    (cl-letf (((symbol-function 'pai-command-arg-words) (lambda () '("run" "--bench" "wb" "--subset"))))
+      (should (equal (funcall complete "of") '("office"))))
+    (cl-letf (((symbol-function 'pai-command-arg-words) (lambda () '("check" "--bench"))))
+      (should (member "lab" (funcall complete ""))))
     (cl-letf (((symbol-function 'pai-command-arg-words) (lambda () '("run" "--bench" "jb"))))
       (should (member "--k" (funcall complete "--")))
       (should (member "parallel" (funcall complete "par"))))
@@ -274,6 +385,8 @@
       (set-file-modes bin #o755)
       (cl-letf (((symbol-function 'pai-harness2--start)
                  (lambda (label command &optional _dir) (push (cons label command) started) nil)))
+        (pai-harness2-dispatch "setup wb --subset web")
+        (should (string-match-p "harness2-pai setup wb --subset web\\'" (cdar started)))
         (pai-harness2-dispatch "run --bench jb --k 1")
         (should (equal (caar started) "run --bench jb --k 1"))
         (should (string-match-p "harness2-pai run --bench jb --k 1\\'" (cdar started))))
@@ -281,7 +394,10 @@
         (should (member "HARNESS2_PAI_MODEL=prov/model-a" env))
         (should (member "HARNESS2_PAI_IMPROVER_MODEL=prov/model-a" env))
         (should (member "HARNESS2_IMPROVER_CHANNEL=pai" env))
-        (should (seq-find (lambda (e) (string-prefix-p "PAI_HARNESS2_RUNNER=" e)) env))))))
+        (let ((argv (seq-find (lambda (e) (string-prefix-p "PAI_HARNESS2_EMACS_ARGV=" e)) env)))
+          (should argv)
+          (should (member "pai-harness2-batch-main"
+                          (append (json-parse-string (substring argv 24)) nil))))))))
 
 (provide 'pai-harness2-test)
 ;;; pai-harness2-test.el ends here

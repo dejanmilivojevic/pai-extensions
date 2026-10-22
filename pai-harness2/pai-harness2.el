@@ -10,8 +10,8 @@
 ;; experience library for the next task.  Upstream it drives OpenCode or
 ;; Codex; this extension makes pai a third substrate (and the improver too):
 ;;
-;;   pai-harness2-batch.el   headless pai rollouts as JSONL trajectories
-;;                           (bin/pai-harness2-run is its launcher)
+;;   pai-harness2-batch.el   headless pai rollouts (child Emacs processes)
+;;                           recorded as JSONL trajectories
 ;;   pai-harness2-hooks.el   .pai/hooks.json, Claude-Code style lifecycle
 ;;                           hooks dispatched inside pai's tool loop
 ;;   python/harness2_pai/    the `PaiSubstrate', the `pai' improver channel,
@@ -21,10 +21,11 @@
 ;; buffers; nothing blocks Emacs):
 ;;
 ;;   /harness2 install           clone Harness² and install both packages (uv)
-;;   /harness2 setup jb          download a benchmark (upstream harness2-setup)
-;;   /harness2 check             preflight the pai cell, no model calls
+;;   /harness2 setup jb|lab|wb   install a benchmark for pai (wb: --subset S)
+;;   /harness2 check --bench B   preflight the pai cell, no model calls
 ;;   /harness2 demo [--k N]      the local ledger demo with real pai rollouts
-;;   /harness2 run ARGS          harness2 --substrate pai ARGS (e.g. --bench jb --k 1)
+;;   /harness2 run ARGS          harness2 --substrate pai ARGS (e.g. --bench lab --k 1;
+;;                               WorkBuddy: --bench wb --subset office)
 ;;   /harness2 judge ARGS        harness2-judge for the pai cell
 ;;   /harness2 report ARGS       harness2-report for the pai cell
 ;;   /harness2 runs              open the runs directory
@@ -43,6 +44,7 @@
 (require 'pai-ext)
 (require 'pai-commands)
 (require 'pai-settings)
+(require 'pai-harness2-batch)
 
 (defgroup pai-harness2 nil
   "Harness² recursive harnessing with pai as the executor."
@@ -88,7 +90,8 @@ e.g. HARNESS2_JUDGE_MODEL and GOOGLE_CLOUD_PROJECT."
   "Subcommands of `/harness2'.")
 
 (defconst pai-harness2--run-flags
-  '("--bench" "jb" "--k" "--mode" "parallel" "sequential" "--seed" "--split" "all"
+  '("--bench" "jb" "lab" "wb" "--subset" "office" "web" "code"
+    "--k" "--mode" "parallel" "sequential" "--seed" "--split" "all"
     "train" "test" "--max-tasks" "--only-domains" "--workers" "--tag" "--dry-run")
   "Flags offered after `/harness2 run', `judge' and `report'.")
 
@@ -107,9 +110,9 @@ e.g. HARNESS2_JUDGE_MODEL and GOOGLE_CLOUD_PROJECT."
   "This extension's Python package directory."
   (expand-file-name "python" pai-harness2--dir))
 
-(defun pai-harness2-runner ()
-  "The headless rollout launcher script."
-  (expand-file-name "bin/pai-harness2-run" pai-harness2--dir))
+(defun pai-harness2-rollout-command ()
+  "The child-Emacs command line Harness² runs a rollout with."
+  (pai-harness2-batch-command))
 
 (defun pai-harness2--model-id ()
   "The pai model id rollouts use."
@@ -130,7 +133,8 @@ e.g. HARNESS2_JUDGE_MODEL and GOOGLE_CLOUD_PROJECT."
                  (concat "HARNESS2_IMPROVER_CHANNEL=" pai-harness2-improver-channel)
                  (and pai-harness2-thinking
                       (concat "HARNESS2_PAI_THINKING=" pai-harness2-thinking))
-                 (concat "PAI_HARNESS2_RUNNER=" (pai-harness2-runner))
+                 (concat "PAI_HARNESS2_EMACS_ARGV="
+                         (json-serialize (vconcat (pai-harness2-rollout-command))))
                  (concat "PAI_EMACS=" (expand-file-name invocation-name invocation-directory))
                  (and (pai-harness2--root) (concat "PAI_ROOT=" (pai-harness2--root))))
            pai-harness2-environment))))
@@ -181,7 +185,7 @@ DIRECTORY defaults to the Harness² checkout.  Return the buffer."
          (format "improver:          %s/%s" pai-harness2-improver-channel
                  (or pai-harness2-improver-model (pai-harness2--model-id) "?"))
          (format "thinking:          %s" (or pai-harness2-thinking "model default"))
-         (format "runner:            %s" (abbreviate-file-name (pai-harness2-runner)))
+         (format "rollouts:          %s" (abbreviate-file-name (car (pai-harness2-rollout-command))))
          (format "pai:               %s" (or (and (pai-harness2--root)
                                                   (abbreviate-file-name (pai-harness2--root)))
                                              "?")))
@@ -223,9 +227,8 @@ DIRECTORY defaults to the Harness² checkout.  Return the buffer."
         (if (file-directory-p dir) (progn (dired-other-window dir) nil)
           (list :message (format "No runs yet in %s" (abbreviate-file-name dir))))))
      ((equal sub "setup")
-      (pai-harness2--start (concat "setup " rest)
-                           (concat (shell-quote-argument (pai-harness2--venv-bin "harness2-setup"))
-                                   " " (if (string-empty-p rest) "jb" rest)))
+      (let ((args (if (string-empty-p rest) "jb" rest)))
+        (pai-harness2--start (concat "setup " args) (pai-harness2--cli "setup" args)))
       nil)
      ((equal sub "render")
       (if (string-empty-p rest)
@@ -248,8 +251,10 @@ DIRECTORY defaults to the Harness² checkout.  Return the buffer."
       (pai-harness2-dispatch args))))
 
 (defconst pai-harness2-completion-tree
-  `(("install") ("status") ("help") ("check" (:rest "--bench" "jb"))
-    ("setup" "jb" "lab" "wb")
+  `(("install") ("status") ("help")
+    ("check" (:rest "--bench" "jb" "lab" "wb" "--subset" "office" "web" "code"))
+    ("setup" ("jb" (:rest "--dry-run")) ("lab" (:rest "--dry-run"))
+             ("wb" (:rest "--subset" "office" "web" "code" "--dry-run")))
     ("demo" (:rest "--k" "--mode" "parallel" "sequential" "both" "--improver" "demo" "pai"
                    "--output"))
     ("run" (:rest ,@pai-harness2--run-flags))

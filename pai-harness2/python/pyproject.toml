@@ -14,3 +14,7 @@ harness2-pai = "harness2_pai.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["harness2_pai*"]
+
+[tool.setuptools.package-data]
+harness2_pai = ["wb_runner/agents/*.py", "wb_runner/configs/harnesses/*/*.yaml",
+                "wb_runner/configs/harnesses/*/versions/*.yaml"]

@@ -9,12 +9,17 @@
 ;; and recorded as a JSONL event stream that the Python `PaiSubstrate'
 ;; renders into Harness²'s trajectory grammar.
 ;;
-;; Run it with bin/pai-harness2-run, or directly:
+;; A rollout is a child Emacs; `pai-harness2-batch-command' returns its
+;; command line (the load path this Emacs loaded pai from), which `/harness2'
+;; hands to Harness² as PAI_HARNESS2_EMACS_ARGV:
 ;;
-;;   emacs -Q --batch -L <pai>/lisp -L <pai>/vendor/vui -L <this dir> \
-;;     -l pai-harness2-batch -f pai-harness2-batch-main \
+;;   emacs -Q --batch -L <pai>/lisp ... -l pai-harness2-batch \
+;;     -f pai-harness2-batch-main \
 ;;     --cwd WORKSPACE --prompt-file PROMPT.txt --model anthropic/claude-x \
 ;;     --events traj.jsonl --timeout 3600
+;;
+;; The workspace may be remote: with --cwd /docker:USER@CONTAINER:/workspace/
+;; pai runs here but its tools act inside the container through TRAMP.
 ;;
 ;; Options:
 ;;   --cwd DIR            workspace (the harness files live at its root)
@@ -31,6 +36,10 @@
 ;;   --inherit-skills     keep the user's personal skills visible
 ;;   --enable-ext NAME    force an extension on   (repeatable)
 ;;   --disable-ext NAME   force an extension off  (repeatable)
+;;   --endpoint URL       an OpenAI-compatible endpoint; --model endpoint/ID
+;;   --endpoint-key KEY   its API key
+;;   --deny-tool NAME     remove a tool from the run (repeatable)
+;;   --deny-host HOST     refuse tool calls whose arguments name HOST (repeatable)
 ;;   --faux FILE          scripted faux provider responses (tests)
 ;;
 ;; Isolation (the default): a throw-away pai directory receives copies of the
@@ -49,6 +58,9 @@
 (require 'subr-x)
 (require 'seq)
 (require 'pai)
+(require 'tramp)
+(require 'tramp-container nil t)
+(defvar tramp-histfile-override)
 (require 'pai-harness2-hooks)
 
 (defvar pai-faux-responses)
@@ -84,7 +96,7 @@ in batch.  `pai-interactive-subagents' opens windows; the headless
   "Parse command-line ARGS (a list of strings) into an options plist.
 Signals `user-error' on unknown options or missing values."
   (let ((opts (list :timeout 3600 :isolate t))
-        (enable '()) (disable '()))
+        (enable '()) (disable '()) (deny-tools '()) (deny-hosts '()))
     (while args
       (let ((a (pop args)))
         (cl-flet ((val () (or (pop args) (user-error "Option %s needs a value" a))))
@@ -104,14 +116,23 @@ Signals `user-error' on unknown options or missing values."
             ("--enable-ext" (push (val) enable))
             ("--disable-ext" (push (val) disable))
             ("--faux" (setq opts (plist-put opts :faux (val))))
+            ("--endpoint" (setq opts (plist-put opts :endpoint (val))))
+            ("--endpoint-key" (setq opts (plist-put opts :endpoint-key (val))))
+            ("--deny-tool" (push (val) deny-tools))
+            ("--deny-host" (push (val) deny-hosts))
             ("--" nil)
             (_ (user-error "Unknown option %s" a))))))
     (setq opts (plist-put opts :enable (nreverse enable)))
     (setq opts (plist-put opts :disable (nreverse disable)))
+    (setq opts (plist-put opts :deny-tools (nreverse deny-tools)))
+    (setq opts (plist-put opts :deny-hosts (nreverse deny-hosts)))
     ;; Paths are relative to where the runner was invoked, not the workspace.
     (dolist (k '(:cwd :prompt-file :events :final :session-out :pai-home :faux))
       (when (plist-get opts k)
         (setq opts (plist-put opts k (expand-file-name (plist-get opts k))))))
+    (when (and (plist-get opts :endpoint)
+               (not (string-prefix-p "endpoint/" (or (plist-get opts :model) ""))))
+      (user-error "--endpoint needs --model endpoint/MODEL-ID"))
     (unless (plist-get opts :cwd) (user-error "--cwd is required"))
     (unless (or (plist-get opts :prompt) (plist-get opts :prompt-file))
       (user-error "--prompt or --prompt-file is required"))
@@ -316,11 +337,25 @@ Signals `user-error' on unknown options or missing values."
                                   :null-object :null :false-object :false))))
       (make-hash-table :test 'equal)))
 
-(defun pai-harness2-batch-isolated-settings (source enable disable &optional model)
+(defun pai-harness2-batch--endpoint-provider (url model-id)
+  "A custom-provider settings entry for the OpenAI-compatible URL serving MODEL-ID."
+  (let ((p (make-hash-table :test 'equal))
+        (m (make-hash-table :test 'equal)))
+    (puthash "id" model-id m)
+    (puthash "id" "endpoint" p)
+    (puthash "base-url" url p)
+    (puthash "api" "openai-completions" p)
+    (puthash "models" (vector m) p)
+    p))
+
+(defun pai-harness2-batch-isolated-settings (source enable disable &optional model endpoint
+                                                   endpoint-model)
   "Return the settings hash for an isolated home, derived from SOURCE.
 SOURCE is the user's settings (a hash table, not modified).  Memory is
 switched off, extensions in DISABLE off and in ENABLE on.  MODEL, when
-given, becomes the default model (setup then resolves it directly)."
+given, becomes the default model (setup then resolves it directly).
+ENDPOINT, a URL, adds the `endpoint' provider serving ENDPOINT-MODEL
+\(endpoint/ID, default MODEL)."
   (let* ((settings (copy-hash-table source))
          (exts (let ((e (gethash "extensions" settings)))
                  (if (hash-table-p e) (copy-hash-table e) (make-hash-table :test 'equal))))
@@ -338,13 +373,24 @@ given, becomes the default model (setup then resolves it directly)."
       (puthash "memory" mem settings))
     (puthash "default-project-trust" "always" settings)
     (when model (puthash "model" model settings))
+    (when endpoint
+      (let ((others (seq-remove (lambda (p) (and (hash-table-p p)
+                                                 (equal (gethash "id" p) "endpoint")))
+                                (append (gethash "custom-providers" settings) nil))))
+        (puthash "custom-providers"
+                 (vconcat others
+                          (list (pai-harness2-batch--endpoint-provider
+                                 endpoint (string-remove-prefix
+                                           "endpoint/" (or endpoint-model model "")))))
+                 settings)))
     settings))
 
-(defun pai-harness2-batch-make-home (source-dir home enable disable &optional model)
+(defun pai-harness2-batch-make-home (source-dir home enable disable &optional model
+                                                endpoint endpoint-key endpoint-model)
   "Populate HOME as an isolated pai directory seeded from SOURCE-DIR.
 Copies auth and MCP configuration, links the extensions directory and
-writes settings from `pai-harness2-batch-isolated-settings' (with MODEL).
-Return HOME."
+writes settings from `pai-harness2-batch-isolated-settings' (with MODEL
+and ENDPOINT, whose ENDPOINT-KEY goes into auth.json).  Return HOME."
   (make-directory home t)
   (dolist (f '("auth.json" "mcp.json" "models.json"))
     (let ((src (expand-file-name f source-dir)))
@@ -356,9 +402,18 @@ Return HOME."
       (make-symbolic-link (file-truename ext) dst)))
   (let ((settings (pai-harness2-batch-isolated-settings
                    (pai-harness2-batch--json-file (expand-file-name "settings.json" source-dir))
-                   enable disable model)))
+                   enable disable model endpoint endpoint-model)))
     (with-temp-file (expand-file-name "settings.json" home)
       (insert (json-serialize settings :null-object :null :false-object :false))))
+  (when endpoint
+    (let ((auth (pai-harness2-batch--json-file (expand-file-name "auth.json" home)))
+          (entry (make-hash-table :test 'equal)))
+      (puthash "type" "api_key" entry)
+      (puthash "key" (or endpoint-key "none") entry)
+      (puthash "endpoint" entry auth)
+      (with-temp-file (expand-file-name "auth.json" home)
+        (insert (json-serialize auth :null-object :null :false-object :false)))
+      (set-file-modes (expand-file-name "auth.json" home) #o600)))
   home)
 
 ;;;; The run
@@ -371,10 +426,34 @@ Return HOME."
     (goto-char (point-min))
     (setq pai-faux-responses (read (current-buffer)))))
 
-(defun pai-harness2-batch--remove-interactive-tools ()
-  "Unregister tools that would wait for a human."
-  (dolist (name pai-harness2-batch-interactive-tools)
+(defun pai-harness2-batch--remove-tools (names)
+  "Unregister the tools in NAMES (and those that would wait for a human)."
+  (dolist (name (append pai-harness2-batch-interactive-tools names))
     (when (pai-tool-get name) (pai-unregister-tool name))))
+
+(defun pai-harness2-batch-host-denied (hosts args)
+  "Return the first of HOSTS that tool-call ARGS mention, or nil.
+A host matches itself and its subdomains, as a whole name in the
+arguments' JSON text (so github.com also catches raw.githubusercontent.com
+only when listed)."
+  (let ((text (downcase (or (ignore-errors (pai-json-encode args)) (format "%S" args)))))
+    (seq-find (lambda (host)
+                (string-match-p (concat "\\(?:\\`\\|[^a-z0-9-]\\)\\(?:[a-z0-9-]+\\.\\)*"
+                                        (regexp-quote (downcase host))
+                                        "\\(?:\\'\\|[^a-z0-9.-]\\|\\.[^a-z0-9]\\)")
+                                text))
+              hosts)))
+
+(defun pai-harness2-batch--install-host-guard (hosts)
+  "Refuse every tool call whose arguments name one of HOSTS."
+  (when hosts
+    (pai-ext-on nil 'tool-call
+                (lambda (event _ctx)
+                  (when-let ((host (pai-harness2-batch-host-denied hosts (plist-get event :input))))
+                    (pai-harness2-batch-emit (list :type "hook" :event "DenyHost" :host host
+                                                   :tool (plist-get event :name)))
+                    (list :block t
+                          :reason (format "Network access to %s is not allowed in this run." host)))))))
 
 (defun pai-harness2-batch--install-handlers ()
   "Subscribe this instance's event handlers for the trajectory."
@@ -395,6 +474,9 @@ Return `done' or `timeout'."
 
 (defun pai-harness2-batch-run (opts)
   "Run one headless rollout described by OPTS.  Return the exit status."
+  ;; A remote workspace: TRAMP must never stop to ask anything, nor keep
+  ;; shell history in the container (wherever HOME points there).
+  (setq tramp-verbose 1 non-essential nil tramp-histfile-override t)
   (let* ((cwd (file-name-as-directory (expand-file-name (plist-get opts :cwd))))
          (source-dir pai-directory)
          (home (and (plist-get opts :isolate)
@@ -414,7 +496,10 @@ Return `done' or `timeout'."
     (when home
       (pai-harness2-batch-make-home source-dir home (plist-get opts :enable)
                                     (plist-get opts :disable)
-                                    (if (plist-get opts :faux) "faux" (plist-get opts :model)))
+                                    (if (plist-get opts :faux) "faux" (plist-get opts :model))
+                                    (plist-get opts :endpoint)
+                                    (plist-get opts :endpoint-key)
+                                    (plist-get opts :model))
       (setq pai-directory home)
       (unless (plist-get opts :inherit-skills)
         (setq pai-skills-shared-dirs nil)))
@@ -441,8 +526,9 @@ Return `done' or `timeout'."
       (unless pai--model (user-error "No pai model configured; pass --model"))
       (when-let ((lvl (plist-get opts :thinking)))
         (setq pai--reasoning (and (not (equal lvl "off")) (intern lvl))))
-      (pai-harness2-batch--remove-interactive-tools)
+      (pai-harness2-batch--remove-tools (plist-get opts :deny-tools))
       (pai-harness2-batch--install-handlers)
+      (pai-harness2-batch--install-host-guard (plist-get opts :deny-hosts))
       (when pai-harness2-batch--hooks
         (pai-harness2-hooks-install pai-harness2-batch--hooks cwd))
       (pai-harness2-batch-emit
@@ -504,6 +590,27 @@ Return `done' or `timeout'."
             ;; Never follow the link into the real extensions directory.
             (when (file-symlink-p ext) (delete-file ext)))
           (delete-directory (plist-get opts :pai-home) t))))))
+
+(defun pai-harness2-batch--library-dir (feature)
+  "The directory FEATURE is loaded from, or nil."
+  (when-let ((lib (locate-library (symbol-name feature))))
+    (directory-file-name (file-name-directory lib))))
+
+(defun pai-harness2-batch-command (&optional emacs)
+  "The command line (a list) of a child Emacs running one rollout.
+EMACS defaults to this Emacs's own executable; the load path is the one
+pai, vui, the faux test provider and this extension were loaded from here."
+  (append
+   (list (or emacs (expand-file-name invocation-name invocation-directory))
+         "-Q" "--batch" "--eval" "(setq load-prefer-newer t)")
+   (apply #'append
+          (mapcar (lambda (dir) (list "-L" dir))
+                  (delete-dups
+                   (delq nil (list (pai-harness2-batch--library-dir 'pai)
+                                   (pai-harness2-batch--library-dir 'vui)
+                                   (pai-harness2-batch--library-dir 'pai-faux)
+                                   (directory-file-name pai-harness2-batch--dir))))))
+   (list "-l" "pai-harness2-batch" "-f" "pai-harness2-batch-main")))
 
 ;;;###autoload
 (defun pai-harness2-batch-main ()

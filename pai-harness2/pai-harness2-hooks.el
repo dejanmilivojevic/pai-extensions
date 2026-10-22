@@ -146,25 +146,28 @@ pai's `bash', `edit' and `write' tools."
 
 (defun pai-harness2-hooks-run-command (command input cwd &optional timeout)
   "Run hook COMMAND in CWD with INPUT (a string) on stdin.
+CWD may be remote (TRAMP): the hook then runs on that host, next to the
+workspace it inspects, exactly like the agent's own bash tool.
 Return a plist (:exit N :stdout S :stderr S :json ALIST-OR-NIL)."
-  (let ((in (make-temp-file "pai-hook-in"))
-        (err (make-temp-file "pai-hook-err"))
-        (default-directory (file-name-as-directory cwd))
-        (process-environment (append (list (concat "CLAUDE_PROJECT_DIR=" cwd)
-                                           (concat "PAI_PROJECT_DIR=" cwd))
-                                     process-environment)))
+  (let* ((default-directory (file-name-as-directory cwd))
+         (local (file-local-name (directory-file-name default-directory)))
+         (in (make-nearby-temp-file "pai-hook-in"))
+         (err (make-nearby-temp-file "pai-hook-err"))
+         (process-environment (append (list (concat "CLAUDE_PROJECT_DIR=" local)
+                                            (concat "PAI_PROJECT_DIR=" local))
+                                      process-environment)))
     (unwind-protect
         (progn
           (let ((coding-system-for-write 'utf-8)) (write-region input nil in nil 'silent))
           (with-temp-buffer
             (let* ((exit (condition-case e
-                             (call-process "timeout" in (list t err) nil
+                             (process-file "timeout" in (list t err) nil
                                            (number-to-string (or timeout pai-harness2-hooks-timeout))
-                                           "bash" "-c" command)
+                                           "sh" "-c" command)
                            (error (format "%s" (error-message-string e)))))
                    (stdout (buffer-string))
                    (stderr (with-temp-buffer
-                             (insert-file-contents err)
+                             (ignore-errors (insert-file-contents err))
                              (buffer-string))))
               (list :exit (if (integerp exit) exit 1)
                     :stdout stdout

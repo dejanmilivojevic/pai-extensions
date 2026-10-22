@@ -1,0 +1,11 @@
+# pai-harness: pai (the Emacs agent) with a harness workspace staged by Harness².
+# pai runs on the host in a child Emacs; its tools act in the task container through
+# TRAMP's docker method, so no mount and no in-container install is needed. The model is
+# reached through the job-local bench proxy (model_connection: local_proxy) unless the
+# job passes PAI_MODEL. Installed by `harness2-pai setup wb`.
+harness:
+  name: pai-harness
+  import_path: "workbuddy_bench.agents.pai_harness_agent:PaiHarnessAgent"
+  protocol: openai
+  params:
+    PAI_TIMEOUT: null

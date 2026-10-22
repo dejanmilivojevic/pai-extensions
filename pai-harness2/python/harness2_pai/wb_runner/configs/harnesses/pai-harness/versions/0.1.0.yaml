@@ -1,0 +1,4 @@
+# pai 0.1.0. The command line, model and harness workspace come from the job.
+harness:
+  params:
+    PAI_VERSION: "0.1.0"
