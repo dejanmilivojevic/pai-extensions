@@ -19,6 +19,7 @@ core README).
 | [`pai-context/`](pai-context/) | Context-usage report and full-context dump |
 | [`pai-dap/`](pai-dap/) | DAP debugger tool |
 | [`pai-dashboard/`](pai-dashboard/) | A welcome dashboard at the top of new conversations |
+| [`pai-harness2/`](pai-harness2/) | Harness² recursive harness improvement with pai as the executor and improver (`/harness2`) |
 | [`pai-interactive-subagents/`](pai-interactive-subagents/) | Live subagent sessions in sibling buffers |
 | [`pai-subagents/`](pai-subagents/) | Older headless subagent delegation (use this or the interactive one, not both) |
 | [`pai-learn/`](pai-learn/) | A teaching system with graded quizzes and in-Emacs diagrams |
@@ -31,8 +32,8 @@ core README).
 | [`pai-web/`](pai-web/) | A web UI (phone first) to monitor and control every pai instance |
 | [`xwidget-browser/`](xwidget-browser/) | A real browser for the agent via xwidget-webkit |
 
-`pai-todo/`, `pai-prompt-snippets/` and `pai-web/` have their own, more
-detailed READMEs.
+`pai-todo/`, `pai-prompt-snippets/`, `pai-web/` and `pai-harness2/` have their
+own, more detailed READMEs.
 
 ## Installation
 

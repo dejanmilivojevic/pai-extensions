@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "harness2-pai"
+version = "0.1.0"
+description = "The pai Emacs agent as a Harness² substrate and improver channel"
+requires-python = ">=3.12,<3.14"
+dependencies = []   # harness2 itself: install it from its checkout (uv pip install -e .)
+
+[project.scripts]
+harness2-pai = "harness2_pai.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["harness2_pai*"]
