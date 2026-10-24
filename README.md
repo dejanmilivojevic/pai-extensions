@@ -15,6 +15,7 @@ core README).
 |-----------|--------------|
 | [`pai-anthropic/`](pai-anthropic/) | Anthropic hosted provider (API key; OAuth handler for `/login anthropic`) |
 | [`pai-openrouter/`](pai-openrouter/) | OpenRouter hosted provider |
+| [`pai-kimi/`](pai-kimi/) | Kimi Code provider: `/login kimi` signs in with a Kimi account via Kimi Code's device flow (no API key), kimi.ai hosts by default |
 | [`pai-ask-user/`](pai-ask-user/) | `ask_user_question`: the agent asks you a question and waits for the answer |
 | [`pai-context/`](pai-context/) | Context-usage report and full-context dump |
 | [`pai-dap/`](pai-dap/) | DAP debugger tool |
@@ -702,6 +703,7 @@ rewrite for Emacs and pai, and any bugs are ours.
 | `pai-dap/` | [can1357/oh-my-pi](https://github.com/can1357/oh-my-pi) (`tools/debug.ts`, `dap/client.ts`) | Port of the debug tool and DAP client |
 | `pai-lsp/` | [can1357/oh-my-pi](https://github.com/can1357/oh-my-pi) (`packages/coding-agent/src/lsp`) | The `lsp` tool's action set mirrors oh-my-pi's; the backends use Emacs' own Eglot / lsp-mode |
 | `pai-browser/` | [microsoft/playwright-mcp](https://github.com/microsoft/playwright-mcp), [ChromeDevTools/chrome-devtools-mcp](https://github.com/ChromeDevTools/chrome-devtools-mcp) | Not a port: a bridge that drives these MCP servers through `pai-mcp` |
+| `pai-kimi/` | [MoonshotAI/kimi-cli](https://github.com/MoonshotAI/kimi-cli) (`auth/oauth.py`, `llm.py`) | Reimplements Kimi Code CLI's login, identity headers and thinking switch |
 | `pai-anthropic/`, `pai-openrouter/`, `pai-dashboard/`, `pai-web/`, `xwidget-browser/` | none | Original to this project |
 
 pai itself is a port of [earendil-works/pi](https://github.com/earendil-works/pi).
