@@ -219,6 +219,38 @@
       (should (equal (plist-get (pai-auth-login-command "kimi" nil) :message)
                      "Logged in to kimi")))))
 
+;;;; Usage
+
+(defconst pai-kimi-test--usages
+  '(:limits ((:window (:duration 300 :timeUnit "TIME_UNIT_MINUTE")
+              :detail (:limit "100" :remaining "93" :resetTime "2026-10-24T18:34:50.054816Z")))
+    :usages (:limit_5h (:used_ratio 0.07 :reset_time "2026-10-24T18:34:49Z")
+             :limit_month_total (:used_ratio 0.0001 :reset_time "2026-11-25T00:00:00Z")
+             :limit_month_code (:used_ratio 0 :reset_time "2026-11-25T00:00:00Z")))
+  "A /usages reply as Kimi Code sends it.")
+
+(ert-deftest pai-kimi-usage-parse ()
+  "The /usages reply becomes a header summary and a /usage breakdown."
+  (let ((r (pai-kimi--usage-parse pai-kimi-test--usages)))
+    (should (equal (plist-get r :summary) "Kimi 5h 7% mo 0%"))
+    (should (string-prefix-p "Kimi Code\n" (plist-get r :detail)))
+    (should (string-match-p "5-hour +7% used (resets " (plist-get r :detail)))
+    (should (string-match-p "month (code) +0% used" (plist-get r :detail)))
+    (should (string-match-p "5h requests +7/100" (plist-get r :detail))))
+  (should-error (pai-kimi--usage-parse '(:usages nil))))
+
+(ert-deftest pai-kimi-usage-request ()
+  "The usage request goes to <base>/usages with the token and identity."
+  (pai-kimi-test--sandbox
+    (cl-letf (((symbol-function 'pai-provider-base-url) (lambda (_) "https://api.kimi.ai/coding/v1")))
+      (let* ((spec (pai-kimi--usage "TOK" nil))
+             (req (plist-get spec :request)))
+        (should (equal (plist-get req :url) "https://api.kimi.ai/coding/v1/usages"))
+        (should (equal (cdr (assoc "Authorization" (plist-get req :headers))) "Bearer TOK"))
+        (should (assoc "X-Msh-Device-Id" (plist-get req :headers)))
+        (should (eq (plist-get spec :parse) #'pai-kimi--usage-parse))))
+    (should-error (pai-kimi--usage nil nil))))
+
 ;;;; Registration
 
 (ert-deftest pai-kimi-extension-registers-provider ()
@@ -236,7 +268,9 @@
       (should (pai-model "kimi/kimi-for-coding"))
       (should (pai-model-reasoning-p (pai-model "kimi/kimi-for-coding")))
       (should (eq (cdr (assoc "kimi" pai-auth-oauth-handlers)) #'pai-kimi-login))
-      (should (member "kimi" (pai-auth--login-completions ""))))))
+      (should (member "kimi" (pai-auth--login-completions "")))
+      (should (eq (cdr (assoc "kimi" pai-usage-providers)) #'pai-kimi--usage))
+      (should (pai-usage-provider-p "kimi")))))
 
 (provide 'pai-kimi-test)
 ;;; pai-kimi-test.el ends here

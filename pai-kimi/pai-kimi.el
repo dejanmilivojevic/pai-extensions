@@ -18,7 +18,9 @@
 ;;   as Kimi requires for tool-call turns with thinking on.
 ;; - The token is refreshed asynchronously before it expires (Kimi CLI's
 ;;   rule: once less than max(300s, half its lifetime) remains).  Nothing
-;;   here blocks the UI: every HTTP exchange uses `url-retrieve'.
+;;   here blocks the UI: every HTTP exchange runs in curl (`pai-http-request').
+;; - `/usage' (and the header line) shows the Kimi Code quota windows from
+;;   the /usages endpoint, like Kimi CLI's /usage.
 ;;
 ;; Outside mainland China the kimi.ai hosts are used (the default); set
 ;; `pai-kimi-oauth-host' / `pai-kimi-base-url' to the kimi.com hosts if
@@ -29,8 +31,8 @@
 
 (require 'cl-lib)
 (require 'subr-x)
-(require 'url)
-(require 'url-http)
+(require 'pai-http)
+(require 'pai-usage)
 (require 'pai)
 (require 'pai-providers)
 (require 'pai-provider-openai)
@@ -121,57 +123,34 @@ when the extension is (re)loaded."
 
 ;;;; Async OAuth HTTP
 
-(defun pai-kimi--parse-response ()
-  "Return (STATUS . JSON) for the `url-retrieve' response in this buffer."
-  (let ((status (bound-and-true-p url-http-response-status))
-        data)
-    (goto-char (point-min))
-    (when (re-search-forward "\r?\n\r?\n" nil t)
-      (let ((s (string-trim (decode-coding-string
-                             (buffer-substring-no-properties (point) (point-max))
-                             'utf-8))))
-        (unless (string-empty-p s)
-          (setq data (ignore-errors (pai-json-decode s))))))
-    (cons status (and (listp data) data))))
-
 (defun pai-kimi--post-form (path params callback)
   "POST PARAMS (alist) form-encoded to PATH on `pai-kimi-oauth-host'.
 CALLBACK receives (STATUS DATA): the HTTP status (nil on network failure or
-timeout) and the decoded JSON plist.  It is called exactly once.  Return the
-`url-retrieve' process, or nil when the request could not start."
+timeout) and the decoded JSON plist.  It is called exactly once.  The
+request runs in curl (`pai-http-request'), so not even the name lookup
+blocks Emacs.  Return the process, or nil when the request could not start."
   (let* ((done nil)
          (finish (lambda (status data)
                    (unless done
                      (setq done t)
                      (condition-case err (funcall callback status data)
-                       (error (message "pai-kimi: %s" (error-message-string err)))))))
-         (url-request-method "POST")
-         (url-request-extra-headers
-          (append '(("Content-Type" . "application/x-www-form-urlencoded")
-                    ("Accept" . "application/json"))
-                  (pai-kimi--common-headers)))
-         (url-request-data (encode-coding-string
-                            (pai-auth--url-encode-params params) 'utf-8))
-         (buf (condition-case err
-                  (url-retrieve (concat (string-remove-suffix "/" pai-kimi-oauth-host) path)
-                                (lambda (_status)
-                                  (let ((res (ignore-errors (pai-kimi--parse-response))))
-                                    (kill-buffer (current-buffer))
-                                    (funcall finish (car res) (cdr res))))
-                                nil t t)
-                (error (funcall finish nil (list :error_description
-                                                 (error-message-string err)))
-                       nil))))
-    (when (buffer-live-p buf)
-      (run-at-time pai-kimi--http-timeout nil
-                   (lambda ()
-                     (unless done
-                       (when (buffer-live-p buf)
-                         (let ((proc (get-buffer-process buf)))
-                           (when proc (delete-process proc)))
-                         (kill-buffer buf))
-                       (funcall finish nil '(:error_description "request timed out")))))
-      (get-buffer-process buf))))
+                       (error (message "pai-kimi: %s" (error-message-string err))))))))
+    (condition-case err
+        (pai-http-request
+         :url (concat (string-remove-suffix "/" pai-kimi-oauth-host) path)
+         :method "POST"
+         :headers (append '(("Content-Type" . "application/x-www-form-urlencoded")
+                            ("Accept" . "application/json"))
+                          (pai-kimi--common-headers))
+         :body (pai-auth--url-encode-params params)
+         :timeout pai-kimi--http-timeout
+         :on-done (lambda (status _headers text)
+                    (let* ((text (and text (string-trim text)))
+                           (data (and text (not (string-empty-p text))
+                                      (ignore-errors (pai-json-decode text)))))
+                      (funcall finish status (and (listp data) data)))))
+      (error (funcall finish nil (list :error_description (error-message-string err)))
+             nil))))
 
 ;;;; Credentials
 
@@ -399,6 +378,87 @@ The OpenAI request, with Kimi CLI's headers, its thinking switch instead of
                            (pai-kimi--common-headers))
           :body body)))
 
+;;;; Usage (/usage and the header line)
+
+(defun pai-kimi--number (v)
+  "Return V (a number or numeric string) as a number, or nil."
+  (cond ((numberp v) v)
+        ((and (stringp v) (string-match-p "\\`[0-9.]+\\'" v)) (string-to-number v))))
+
+(defun pai-kimi--window-label (key)
+  "Return a short label for a Kimi `usages' KEY such as :limit_5h."
+  (let ((name (string-remove-prefix "limit_" (substring (symbol-name key) 1))))
+    (pcase name
+      ("5h" "5-hour")
+      ("month_total" "month")
+      ("month_code" "month (code)")
+      ("week" "7-day")
+      (_ (replace-regexp-in-string "_" " " name)))))
+
+(defun pai-kimi--limit-label (item)
+  "Return a label for a Kimi `limits' ITEM from its window, like Kimi CLI."
+  (let* ((window (plist-get item :window))
+         (duration (pai-kimi--number (plist-get window :duration)))
+         (unit (or (plist-get window :timeUnit) "")))
+    (cond ((null duration) "limit")
+          ((string-match-p "MINUTE" unit)
+           (if (and (>= duration 60) (zerop (% (truncate duration) 60)))
+               (format "%dh requests" (/ (truncate duration) 60))
+             (format "%dm requests" duration)))
+          ((string-match-p "HOUR" unit) (format "%dh requests" duration))
+          ((string-match-p "DAY" unit) (format "%dd requests" duration))
+          (t (format "%ds requests" duration)))))
+
+(defun pai-kimi--usage-parse (resp)
+  "Return the pai usage result for Kimi's /usages reply RESP."
+  (let ((usages (plist-get resp :usages))
+        (limits (plist-get resp :limits))
+        rows pct-5h pct-month)
+    (cl-loop for (key val) on (and (listp usages) usages) by #'cddr
+             for ratio = (pai-kimi--number (plist-get val :used_ratio))
+             when ratio do
+             (let ((pct (min 100 (max 0 (round (* 100 ratio))))))
+               (pcase key
+                 (:limit_5h (setq pct-5h pct))
+                 (:limit_month_total (setq pct-month pct)))
+               (push (format "  %-13s %3d%% used%s" (pai-kimi--window-label key) pct
+                             (let ((r (pai-usage--reset-string (plist-get val :reset_time))))
+                               (if r (format " (resets %s)" r) "")))
+                     rows)))
+    (dolist (item (and (listp limits) limits))
+      (let* ((detail (or (plist-get item :detail) item))
+             (limit (pai-kimi--number (plist-get detail :limit)))
+             (remaining (pai-kimi--number (plist-get detail :remaining)))
+             (used (or (pai-kimi--number (plist-get detail :used))
+                       (and limit remaining (- limit remaining)))))
+        (when limit
+          (push (format "  %-13s %d/%d%s" (pai-kimi--limit-label item) (or used 0) limit
+                        (let ((r (pai-usage--reset-string
+                                  (or (plist-get detail :resetTime)
+                                      (plist-get detail :reset_time)))))
+                          (if r (format " (resets %s)" r) "")))
+                rows))))
+    (unless rows (error "no Kimi usage data"))
+    (list :summary (string-join
+                    (delq nil (list "Kimi"
+                                    (and pct-5h (format "5h %d%%" pct-5h))
+                                    (and pct-month (format "mo %d%%" pct-month))))
+                    " ")
+          :detail (concat "Kimi Code\n" (string-join (nreverse rows) "\n")))))
+
+(defun pai-kimi--usage (key _cred)
+  "Return the request for Kimi Code usage, authorized with token KEY."
+  (unless (and (stringp key) (not (string-empty-p key)))
+    (error "not logged in"))
+  (list :request (list :url (concat (string-remove-suffix
+                                     "/" (or (ignore-errors (pai-provider-base-url "kimi"))
+                                             pai-kimi-base-url))
+                                    "/usages")
+                       :headers (append (list (cons "Authorization" (concat "Bearer " key))
+                                              (cons "User-Agent" (pai-kimi--user-agent)))
+                                        (pai-kimi--common-headers)))
+        :parse #'pai-kimi--usage-parse))
+
 ;;;; Registration
 
 (defun pai-kimi-extension (_pi)
@@ -413,6 +473,8 @@ The OpenAI request, with Kimi CLI's headers, its thinking switch instead of
   (setf (alist-get "kimi" pai-auth-oauth-handlers nil nil #'equal) #'pai-kimi-login)
   (setf (alist-get "kimi" pai-auth-oauth-refresh-handlers nil nil #'equal)
         #'pai-kimi--refresh-handler)
+  (pai-register-usage-provider "kimi" #'pai-kimi--usage)
+  (setf (alist-get "kimi" pai-usage-placeholders nil nil #'equal) "Kimi 5h --% mo --%")
   (when (ignore-errors (pai-kimi--oauth-cred))
     (pai-kimi--ensure-timer)))
 
