@@ -61,10 +61,23 @@ when the extension is (re)loaded."
 (defconst pai-kimi--client-id "17e5f671-d194-4dfb-9706-5516cb48c098"
   "Public OAuth client id of the Kimi Code CLI.")
 
+(defcustom pai-kimi-max-output-tokens 32768
+  "Output token limit requested for Kimi Code replies.
+Kimi's /models does not declare one; pai's generic default (8192) cut long
+replies and tool calls short."
+  :type 'integer)
+
+(defcustom pai-kimi-thinking-required-regexp "\\`k3\\.1-pro"
+  "Regexp of model ids that refuse thinking \"disabled\".
+For them thinking is always enabled, even at thinking level off (K3.1 Pro
+answers \"does not support disabled thinking mode\" otherwise)."
+  :type 'regexp)
+
 (defconst pai-kimi--fallback-models
   '((:id "kimi-for-coding" :name "Kimi for Coding" :context-window 262144
-     :max-tokens 32768))
-  "Models offered before discovery (`/model' lists the account's models).")
+     :max-tokens 32768 :reasoning t))
+  "Models offered before the account's model list is known.
+The window is deliberately low: underestimating only compacts sooner.")
 
 (defconst pai-kimi--http-timeout 30
   "Seconds before an OAuth HTTP exchange is abandoned.")
@@ -286,6 +299,7 @@ normally refreshes well before expiry."
                  (setq pai-kimi--rejected-refresh nil)
                  (pai-kimi--store-token data)
                  (pai-kimi--ensure-timer)
+                 (pai-kimi-refresh-models t)
                  (pai-kimi--note buffer "Logged in to Kimi.  Pick a model with /model kimi/…"))
                 ((member err '("authorization_pending" nil))
                  ;; nil: network hiccup or 5xx -- keep polling until the deadline
@@ -333,6 +347,12 @@ The flow finishes in the background and reports in the chat buffer."
 
 ;;;; Requests
 
+(defun pai-kimi--thinking-required-p (model)
+  "Return non-nil when MODEL refuses thinking disabled."
+  (or (pai-truthy (plist-get model :thinking-required))
+      (and (stringp (plist-get model :id))
+           (string-match-p pai-kimi-thinking-required-regexp (plist-get model :id)))))
+
 (defun pai-kimi--thinking-text (message)
   "Return the concatenated thinking text of assistant MESSAGE, or nil."
   (let ((parts (delq nil (mapcar (lambda (b)
@@ -343,10 +363,14 @@ The flow finishes in the background and reports in the chat buffer."
 
 (defun pai-kimi--messages (messages)
   "Translate unified MESSAGES like `pai-openai--messages', adding the
-`reasoning_content' Kimi expects on assistant turns that thought."
+`reasoning_content' of Kimi's own earlier turns, as Kimi CLI does.  The
+reasoning of other providers' turns (a conversation continued from Claude)
+is not sent: Kimi does not need it, and it can fill a large part of the
+context window."
   (cl-mapcan (lambda (m)
                (let ((out (pai-openai--messages (list m)))
                      (thinking (and (eq (pai-message-role m) 'assistant)
+                                    (equal (plist-get m :provider) "kimi")
                                     (pai-kimi--thinking-text m))))
                  (if (and out thinking (not (string-empty-p thinking)))
                      (list (append (car out) (list :reasoning_content thinking)))
@@ -364,7 +388,9 @@ The OpenAI request, with Kimi CLI's headers, its thinking switch instead of
 `reasoning_effort', and reasoning sent back on earlier assistant turns."
   (let* ((req (pai-openai-build-request model context options))
          (body (pai-kimi--plist-remove (plist-get req :body) :reasoning_effort))
-         (thinking (and (pai-model-reasoning-p model) (plist-get options :reasoning))))
+         (thinking (and (pai-model-reasoning-p model)
+                        (or (plist-get options :reasoning)
+                            (pai-kimi--thinking-required-p model)))))
     (setq body (plist-put body :messages
                           (pai-kimi--messages (plist-get context :messages))))
     (when (pai-model-reasoning-p model)
@@ -377,6 +403,123 @@ The OpenAI request, with Kimi CLI's headers, its thinking switch instead of
                            (list (cons "User-Agent" (pai-kimi--user-agent)))
                            (pai-kimi--common-headers))
           :body body)))
+
+;;;; Models (asynchronous discovery, cached)
+
+;; pai's generic discovery runs curl synchronously and reads only a model's
+;; id and window, giving the 8192 default output cap and no thinking flags.
+;; Kimi's /models declares more (limit.context, reasoning, image input), and
+;; its windows depend on the plan (K3 is 256K on lower tiers, 1M above).  The
+;; list is therefore fetched in the background -- after login, at startup
+;; and whenever `/model' asks -- cached in ~/.pai/kimi/models.eld and served
+;; from that cache by the provider's :list-models callback, so every chat
+;; sees the account's real models without waiting on the network.
+
+(defun pai-kimi--models-file ()
+  "Return the file caching the account's model list."
+  (expand-file-name "models.eld" (pai-state-directory "kimi")))
+
+(defun pai-kimi--model-spec (item)
+  "Return a pai model spec for a Kimi /models ITEM, or nil."
+  (let ((id (plist-get item :id)))
+    (when (and (stringp id) (not (string-empty-p id)))
+      (let* ((limit (plist-get item :limit))
+             (window (seq-find (lambda (v) (and (integerp v) (> v 0)))
+                               (list (and (listp limit) (plist-get limit :context))
+                                     (plist-get item :context_length))))
+             (reasoning (eq (plist-get item :supports_reasoning) t))
+             (name (plist-get item :display_name)))
+        (append (list :id id)
+                (when (stringp name) (list :name (format "%s (%s)" name id)))
+                (when window (list :context-window window))
+                (list :max-tokens pai-kimi-max-output-tokens
+                      :reasoning (if reasoning t :false)
+                      :input (if (eq (plist-get item :supports_image_in) t)
+                                 '("text" "image")
+                               '("text")))
+                (when (string-match-p pai-kimi-thinking-required-regexp id)
+                  (list :thinking-required t)))))))
+
+(defun pai-kimi--parse-models (resp)
+  "Return the model specs of a Kimi /models reply RESP; signal if malformed."
+  (let ((data (plist-get resp :data)))
+    (unless (and data (listp data)) (error "Malformed Kimi model list"))
+    (or (delq nil (mapcar #'pai-kimi--model-spec data))
+        (error "Kimi listed no models"))))
+
+(defvar pai-kimi--models nil "Cached model specs, or nil when not loaded.")
+
+(defun pai-kimi--cached-models ()
+  "Return the cached model specs, reading the cache file once."
+  (or pai-kimi--models
+      (setq pai-kimi--models
+            (let ((file (pai-kimi--models-file)))
+              (and (file-readable-p file)
+                   (ignore-errors
+                     (with-temp-buffer
+                       (insert-file-contents file)
+                       (let ((specs (read (current-buffer))))
+                         (and (listp specs) (seq-every-p #'listp specs) specs)))))))))
+
+(defun pai-kimi--list-models (_provider)
+  "`:list-models' callback: the cached account models (no network).
+Also starts a background refresh, picked up by the next `/model'."
+  (pai-kimi-refresh-models)
+  (or (pai-kimi--cached-models) pai-kimi--fallback-models))
+
+(defvar pai-kimi--refresh-models-inhibit nil
+  "Non-nil while applying fetched models (no new fetch is started).")
+(defvar pai-kimi--models-fetching nil "Non-nil while /models is being fetched.")
+(defvar pai-kimi--models-fetched-at 0 "`float-time' of the last successful fetch.")
+
+(defun pai-kimi--apply-models ()
+  "Register the cached models in the global registry and every pai chat."
+  (let ((apply (lambda ()
+                 (when-let* ((provider (pai-provider "kimi")))
+                   (ignore-errors
+                     (let ((pai-kimi--refresh-models-inhibit t))
+                       (pai-providers-discover "kimi" provider)))))))
+    ;; a temp buffer has no instance-local registries: this sets the defaults
+    (with-temp-buffer (funcall apply))
+    (dolist (buffer (buffer-list))
+      (when (local-variable-p 'pai--models buffer)
+        (with-current-buffer buffer (funcall apply))))))
+
+(defun pai-kimi-refresh-models (&optional force)
+  "Fetch the account's models from Kimi in the background.
+At most once a minute unless FORCE.  On success the cache is replaced and
+the models are registered everywhere."
+  (interactive (list t))
+  (let ((key (ignore-errors (pai-api-key "kimi"))))
+    (when (and key (not pai-kimi--refresh-models-inhibit)
+               (not pai-kimi--models-fetching)
+               (or force (> (- (float-time) pai-kimi--models-fetched-at) 60)))
+      (setq pai-kimi--models-fetching t)
+      (condition-case nil
+          (pai-http-request
+           :url (concat (string-remove-suffix
+                         "/" (or (ignore-errors (pai-provider-base-url "kimi"))
+                                 pai-kimi-base-url))
+                        "/models")
+           :headers (append (list (cons "Authorization" (concat "Bearer " key))
+                                  (cons "User-Agent" (pai-kimi--user-agent)))
+                            (pai-kimi--common-headers))
+           :timeout 20
+           :on-done
+           (lambda (status _headers text)
+             (setq pai-kimi--models-fetching nil)
+             (let ((specs (and (eql status 200) text
+                               (ignore-errors
+                                 (pai-kimi--parse-models (pai-json-decode text))))))
+               (when specs
+                 (setq pai-kimi--models specs
+                       pai-kimi--models-fetched-at (float-time))
+                 (ignore-errors
+                   (with-temp-file (pai-kimi--models-file)
+                     (let ((print-length nil) (print-level nil))
+                       (prin1 specs (current-buffer)))))
+                 (pai-kimi--apply-models)))))
+        (error (setq pai-kimi--models-fetching nil))))))
 
 ;;;; Usage (/usage and the header line)
 
@@ -468,7 +611,9 @@ The OpenAI request, with Kimi CLI's headers, its thinking switch instead of
                          :base-url pai-kimi-base-url
                          :env-key "KIMI_API_KEY"
                          :reasoning t
-                         :models pai-kimi--fallback-models))))
+                         :list-models #'pai-kimi--list-models
+                         :models (or (pai-kimi--cached-models)
+                                     pai-kimi--fallback-models)))))
     (pai-register-provider (plist-put provider :build-request #'pai-kimi-build-request)))
   (setf (alist-get "kimi" pai-auth-oauth-handlers nil nil #'equal) #'pai-kimi-login)
   (setf (alist-get "kimi" pai-auth-oauth-refresh-handlers nil nil #'equal)
@@ -476,7 +621,9 @@ The OpenAI request, with Kimi CLI's headers, its thinking switch instead of
   (pai-register-usage-provider "kimi" #'pai-kimi--usage)
   (setf (alist-get "kimi" pai-usage-placeholders nil nil #'equal) "Kimi 5h --% mo --%")
   (when (ignore-errors (pai-kimi--oauth-cred))
-    (pai-kimi--ensure-timer)))
+    (pai-kimi--ensure-timer))
+  ;; learn the account's models without delaying startup
+  (run-at-time 2 nil #'pai-kimi-refresh-models))
 
 (pai-register-extension #'pai-kimi-extension "kimi")
 

@@ -76,7 +76,7 @@
 (ert-deftest pai-kimi-request-reasoning-content ()
   "Assistant turns that thought send their reasoning back."
   (pai-kimi-test--sandbox
-    (let* ((assistant (list :role 'assistant
+    (let* ((assistant (list :role 'assistant :provider "kimi"
                             :content (list (pai-thinking "plan it")
                                            (list :type 'tool-call :id "c1" :name "ls"
                                                  :arguments '(:path ".")))))
@@ -251,6 +251,93 @@
         (should (eq (plist-get spec :parse) #'pai-kimi--usage-parse))))
     (should-error (pai-kimi--usage nil nil))))
 
+;;;; Models
+
+(defconst pai-kimi-test--models-reply
+  "{\"data\":[{\"id\":\"k3.1-pro\",\"display_name\":\"K3.1 Pro\",\"context_length\":262144,\"supports_reasoning\":true,\"supports_image_in\":true,\"limit\":{\"context\":262144}},{\"id\":\"kimi-for-coding\",\"display_name\":\"K2.8 Preview\",\"context_length\":1048576,\"supports_reasoning\":true,\"supports_image_in\":false,\"limit\":{\"context\":1048576}}]}"
+  "A /models reply as Kimi Code sends it (trimmed).")
+
+(ert-deftest pai-kimi-model-specs ()
+  "Model specs carry Kimi's window, the output cap, reasoning and images."
+  (let* ((specs (pai-kimi--parse-models (pai-json-decode pai-kimi-test--models-reply)))
+         (pro (car specs)) (coding (cadr specs)))
+    (should (equal (plist-get pro :id) "k3.1-pro"))
+    (should (= (plist-get pro :context-window) 262144))
+    (should (= (plist-get pro :max-tokens) pai-kimi-max-output-tokens))
+    (should (eq (plist-get pro :reasoning) t))
+    (should (plist-get pro :thinking-required))
+    (should (member "image" (plist-get pro :input)))
+    (should (equal (plist-get pro :name) "K3.1 Pro (k3.1-pro)"))
+    (should (= (plist-get coding :context-window) 1048576))
+    (should-not (plist-get coding :thinking-required))
+    (should-not (member "image" (plist-get coding :input))))
+  (should-error (pai-kimi--parse-models '(:data nil))))
+
+(ert-deftest pai-kimi-thinking-required-models ()
+  "K3.1 Pro always thinks; other models honour thinking off."
+  (pai-kimi-test--sandbox
+    (cl-letf (((symbol-function 'pai-kimi--tick) #'ignore))
+      (let ((pro (append '(:id "k3.1-pro") pai-kimi-test--model))
+            (k3 (append '(:id "k3") pai-kimi-test--model))
+            (ctx (list :messages (list (pai-user-message "hi")))))
+        (should (equal (plist-get (plist-get (pai-kimi-build-request pro ctx '(:api-key "T")) :body)
+                                  :thinking)
+                       '(:type "enabled")))
+        (should (equal (plist-get (plist-get (pai-kimi-build-request k3 ctx '(:api-key "T")) :body)
+                                  :thinking)
+                       '(:type "disabled")))))))
+
+(ert-deftest pai-kimi-foreign-reasoning-not-sent ()
+  "Reasoning from another provider's turns (e.g. Claude) is not sent to Kimi."
+  (pai-kimi-test--sandbox
+    (let* ((claude (list :role 'assistant :provider "anthropic"
+                         :content (list (pai-thinking (make-string 5000 ?x)) (pai-text "ok"))))
+           (msgs (plist-get (plist-get (pai-kimi-test--request
+                                        (list (pai-user-message "hi") claude) 'high)
+                                       :body)
+                            :messages)))
+      (should (equal (plist-get (nth 1 msgs) :content) "ok"))
+      (should-not (plist-member (nth 1 msgs) :reasoning_content)))))
+
+(ert-deftest pai-kimi-models-fetched-in-background ()
+  "/models is fetched without blocking, cached, and registered everywhere;
+the :list-models callback then answers from the cache."
+  (pai-kimi-test--sandbox
+    (let ((pai--providers (make-hash-table :test 'equal))
+          (pai--models (make-hash-table :test 'equal))
+          (pai-providers--discovered (make-hash-table :test 'equal))
+          (pai-provider-env-keys nil)
+          (pai-auth-oauth-handlers nil)
+          (pai-auth-oauth-refresh-handlers nil)
+          (pai-kimi--models nil)
+          (pai-kimi--models-fetching nil)
+          (pai-kimi--models-fetched-at 0)
+          requested)
+      (cl-letf (((symbol-function 'run-at-time) (lambda (&rest _) 'timer)))
+        (pai-kimi-extension nil))
+      (pai-auth-set "kimi" (list :type "oauth" :access "ACC" :refresh "R"
+                                 :expires (+ (pai-now-ms) 3600000) :lifetime 3600))
+      ;; before the fetch: the conservative fallback
+      (should (= (plist-get (pai-model "kimi/kimi-for-coding") :context-window) 262144))
+      (cl-letf (((symbol-function 'pai-http-request)
+                 (lambda (&rest args)
+                   (setq requested args)
+                   (funcall (plist-get args :on-done) 200 nil pai-kimi-test--models-reply)
+                   'proc)))
+        (pai-kimi-refresh-models t))
+      (should (equal (plist-get requested :url) "https://api.kimi.ai/coding/v1/models"))
+      (should (equal (cdr (assoc "Authorization" (plist-get requested :headers))) "Bearer ACC"))
+      (should (= (plist-get (pai-model "kimi/kimi-for-coding") :context-window) 1048576))
+      (should (= (plist-get (pai-model "kimi/k3.1-pro") :max-tokens) pai-kimi-max-output-tokens))
+      (should (plist-get (pai-model "kimi/k3.1-pro") :thinking-required))
+      (should (file-exists-p (pai-kimi--models-file)))
+      ;; a later /model answers from the cache, never waiting on the network
+      (let ((pai-kimi--models nil))
+        (cl-letf (((symbol-function 'pai-http-request) (lambda (&rest _) (error "network"))))
+          (should (equal (mapcar (lambda (m) (plist-get m :id))
+                                 (pai-kimi--list-models (pai-provider "kimi")))
+                         '("k3.1-pro" "kimi-for-coding"))))))))
+
 ;;;; Registration
 
 (ert-deftest pai-kimi-extension-registers-provider ()
@@ -261,7 +348,8 @@
           (pai-provider-env-keys nil)
           (pai-auth-oauth-handlers nil)
           (pai-auth-oauth-refresh-handlers nil))
-      (pai-kimi-extension nil)
+      (cl-letf (((symbol-function 'run-at-time) (lambda (&rest _) 'timer)))
+        (pai-kimi-extension nil))
       (let ((provider (pai-provider "kimi")))
         (should (eq (plist-get provider :build-request) #'pai-kimi-build-request))
         (should (equal (plist-get provider :base-url) pai-kimi-base-url)))
