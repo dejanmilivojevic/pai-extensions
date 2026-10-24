@@ -12,6 +12,7 @@
   "Run BODY with a throwaway pai directory and credential store."
   (declare (indent 0))
   `(let* ((dir (file-name-as-directory (make-temp-file "pai-kimi" t)))
+          (pai--ext-handlers (make-hash-table :test 'eq))
           (pai-directory dir)
           (pai-auth-storage 'plaintext)
           (pai-auth-gpg-recipient nil)
@@ -314,7 +315,7 @@ the :list-models callback then answers from the cache."
           (pai-kimi--models-fetched-at 0)
           requested)
       (cl-letf (((symbol-function 'run-at-time) (lambda (&rest _) 'timer)))
-        (pai-kimi-extension nil))
+        (pai-kimi-extension (pai-ext-api-create :id "kimi-test")))
       (pai-auth-set "kimi" (list :type "oauth" :access "ACC" :refresh "R"
                                  :expires (+ (pai-now-ms) 3600000) :lifetime 3600))
       ;; before the fetch: the conservative fallback
@@ -338,6 +339,43 @@ the :list-models callback then answers from the cache."
                                  (pai-kimi--list-models (pai-provider "kimi")))
                          '("k3.1-pro" "kimi-for-coding"))))))))
 
+(ert-deftest pai-kimi-model-switch-refreshes-limits ()
+  "Switching to a Kimi model re-reads the limits; when they arrive, a chat
+already on that model gets them (it holds a copy taken at selection)."
+  (pai-kimi-test--sandbox
+    (let ((pai--providers (make-hash-table :test 'equal))
+          (pai--models (make-hash-table :test 'equal))
+          (pai-providers--discovered (make-hash-table :test 'equal))
+          (pai-provider-env-keys nil)
+          (pai-auth-oauth-handlers nil)
+          (pai-auth-oauth-refresh-handlers nil)
+          (pai-kimi--models nil)
+          (pai-kimi--models-fetching nil)
+          (pai-kimi--models-fetched-at 0)
+          (fetches 0))
+      (cl-letf (((symbol-function 'run-at-time) (lambda (&rest _) 'timer)))
+        (pai-kimi-extension (pai-ext-api-create :id "kimi-test")))
+      (pai-auth-set "kimi" (list :type "oauth" :access "ACC" :refresh "R"
+                                 :expires (+ (pai-now-ms) 3600000) :lifetime 3600))
+      (with-temp-buffer
+        (setq-local pai--model (pai-model "kimi/kimi-for-coding"))
+        (should (= (plist-get pai--model :context-window) 262144))
+        (cl-letf (((symbol-function 'pai-http-request)
+                   (lambda (&rest args)
+                     (cl-incf fetches)
+                     (funcall (plist-get args :on-done) 200 nil pai-kimi-test--models-reply)
+                     'proc)))
+          ;; another provider's model: no fetch
+          (pai-ext-emit 'model-select nil :model '(:id "x" :provider "anthropic"))
+          (should (= fetches 0))
+          (pai-ext-emit 'model-select nil :model pai--model)
+          (should (= fetches 1)))
+        ;; `local-variable-p' of `pai--models' marks a pai chat
+        (setq-local pai--models pai--models)
+        (pai-kimi--apply-models)
+        (should (= (plist-get pai--model :context-window) 1048576))
+        (should (= (plist-get pai--model :max-tokens) pai-kimi-max-output-tokens))))))
+
 ;;;; Registration
 
 (ert-deftest pai-kimi-extension-registers-provider ()
@@ -349,7 +387,7 @@ the :list-models callback then answers from the cache."
           (pai-auth-oauth-handlers nil)
           (pai-auth-oauth-refresh-handlers nil))
       (cl-letf (((symbol-function 'run-at-time) (lambda (&rest _) 'timer)))
-        (pai-kimi-extension nil))
+        (pai-kimi-extension (pai-ext-api-create :id "kimi-test")))
       (let ((provider (pai-provider "kimi")))
         (should (eq (plist-get provider :build-request) #'pai-kimi-build-request))
         (should (equal (plist-get provider :base-url) pai-kimi-base-url)))

@@ -483,12 +483,29 @@ Also starts a background refresh, picked up by the next `/model'."
     (with-temp-buffer (funcall apply))
     (dolist (buffer (buffer-list))
       (when (local-variable-p 'pai--models buffer)
-        (with-current-buffer buffer (funcall apply))))))
+        (with-current-buffer buffer
+          (funcall apply)
+          (pai-kimi--update-current-model))))))
+
+(defun pai-kimi--update-current-model ()
+  "Give this chat's current Kimi model the freshly registered limits.
+A chat holds a copy of its model taken when it was selected, so a window or
+output cap learned later would otherwise not reach it."
+  (when (and (boundp 'pai--model) (consp pai--model)
+             (equal (plist-get pai--model :provider) "kimi"))
+    (when-let* ((fresh (pai-model (pai-model-key pai--model))))
+      (setq pai--model fresh))))
+
+(defun pai-kimi--on-model-select (event _ctx)
+  "On switching to a Kimi model, re-read the account's limits in the background."
+  (when (equal (plist-get (plist-get event :model) :provider) "kimi")
+    (pai-kimi-refresh-models)))
 
 (defun pai-kimi-refresh-models (&optional force)
   "Fetch the account's models from Kimi in the background.
-At most once a minute unless FORCE.  On success the cache is replaced and
-the models are registered everywhere."
+At most once a minute unless FORCE.  On success the cache is replaced, the
+models are registered everywhere, and chats using a Kimi model get its
+fresh limits."
   (interactive (list t))
   (let ((key (ignore-errors (pai-api-key "kimi"))))
     (when (and key (not pai-kimi--refresh-models-inhibit)
@@ -604,8 +621,9 @@ the models are registered everywhere."
 
 ;;;; Registration
 
-(defun pai-kimi-extension (_pi)
+(defun pai-kimi-extension (pi)
   "Register the Kimi Code provider, its login and token refresh."
+  (pai-ext-on pi 'model-select #'pai-kimi--on-model-select)
   (let ((provider (pai-register-provider-config
                    (list :id "kimi" :api 'openai-completions
                          :base-url pai-kimi-base-url
