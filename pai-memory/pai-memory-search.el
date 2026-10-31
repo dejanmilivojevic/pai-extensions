@@ -227,12 +227,18 @@ offset INTEGER, size INTEGER, mtime REAL)")
 (defun pai-memory-file-private-p (file)
   "Return non-nil when session FILE's last private-state override is on."
   (with-temp-buffer
-    (insert-file-contents file)
+    ;; raw bytes: no coding detection over a multi-megabyte file, only the
+    ;; lines that mention the marker are decoded
+    (set-buffer-multibyte nil)
+    (insert-file-contents-literally file)
     (goto-char (point-max))
     (let ((found nil) (private nil))
       (while (and (not found) (search-backward "\"private\"" nil t))
-        (let ((e (ignore-errors (pai-json-decode (buffer-substring-no-properties
-                                                   (line-beginning-position) (line-end-position))))))
+        (let ((e (ignore-errors (pai-json-decode
+                                 (decode-coding-string
+                                  (buffer-substring-no-properties
+                                   (line-beginning-position) (line-end-position))
+                                  'utf-8)))))
           (when (and (equal (plist-get e :customType) "memory.state")
                      (plist-member (plist-get e :data) :private))
             (setq found t private (pai-truthy (plist-get (plist-get e :data) :private))))))
@@ -261,11 +267,16 @@ and is public again is read from the start."
                      (pai-memory-file-private-p file))
                     (t was))))
     (cond
-     ((and (= size offset) (not was)) nil)
+     ((= size offset) nil)
      (now
       (unless was
         (sqlite-execute db "INSERT OR REPLACE INTO private (session) VALUES (?)" (list session)))
       (sqlite-execute db "DELETE FROM docs WHERE session=?" (list session))
+      ;; the file is dealt with up to here: without this every pass re-read
+      ;; every private session from the start, and never finished
+      (pai-memory--set-file-state db file size size
+                                  (float-time (file-attribute-modification-time
+                                               (file-attributes file))))
       nil)
      (t
       (when was
@@ -274,9 +285,15 @@ and is public again is read from the start."
         (sqlite-execute db "DELETE FROM files WHERE path=?" (list file)))
       (pai-memory--index-session-file-1 db file cap)))))
 
+(defvar pai-memory-index-chunk-bytes (* 512 1024)
+  "Most bytes of one session file read in one go.
+A big file is indexed over several calls, so no single call blocks long.")
+
 (defun pai-memory--index-session-file-1 (db file cap)
-  "Index the unread tail of session FILE into DB; return non-nil if it read anything.
-Only complete lines are read, so a line being written is picked up next time."
+  "Index the unread tail of session FILE into DB.
+Return `partial' when only the first `pai-memory-index-chunk-bytes' of the
+tail were read, non-nil when it read anything, nil otherwise.  Only complete
+lines are read, so a line being written is picked up next time."
   (let* ((attrs (file-attributes file))
          (size (file-attribute-size attrs))
          (state (pai-memory--file-state db file))
@@ -287,10 +304,17 @@ Only complete lines are read, so a line being written is picked up next time."
     (when (> size offset)
       (let ((project (file-name-nondirectory (directory-file-name (file-name-directory file))))
             (session (file-name-base file))
+            (end (min size (+ offset (max 1 pai-memory-index-chunk-bytes))))
             (consumed 0))
         (with-temp-buffer
           (set-buffer-multibyte nil)
-          (insert-file-contents-literally file nil offset size)
+          (insert-file-contents-literally file nil offset end)
+          (goto-char (point-min))
+          (when (and (< end size) (not (search-forward "\n" nil t)))
+            ;; one line longer than a chunk: read all of it
+            (erase-buffer)
+            (setq end size)
+            (insert-file-contents-literally file nil offset end))
           (goto-char (point-min))
           (let ((start (point)))
             (while (search-forward "\n" nil t)
@@ -307,7 +331,8 @@ Only complete lines are read, so a line being written is picked up next time."
                     consumed (1- (point))))))
         (pai-memory--set-file-state db file (+ offset consumed) size
                                     (float-time (file-attribute-modification-time attrs)))
-        (> consumed 0)))))
+        (cond ((and (< end size) (> consumed 0)) 'partial)
+              (t (> consumed 0)))))))
 
 (defun pai-memory--index-markdown (db spec)
   "Re-index Markdown file SPEC (PATH KIND PROJECT SESSION) when it changed."
@@ -332,33 +357,120 @@ Only complete lines are read, so a line being written is picked up next time."
       (sqlite-execute db "DELETE FROM docs WHERE path=?" (list (car row)))
       (sqlite-execute db "DELETE FROM files WHERE path=?" (list (car row))))))
 
+(defun pai-memory--index-atomically (db what fn)
+  "Call FN with DB inside a savepoint; return its value.
+When FN exits abnormally (an error, \\[keyboard-quit]) its writes are undone,
+so rows are never committed without the offset that says they were read:
+that would index them twice.  An error is reported, naming WHAT, and nil
+returned; a quit goes on up."
+  (let ((ok nil))
+    (sqlite-execute db "SAVEPOINT pai_index_one")
+    (condition-case err
+        (unwind-protect (prog1 (funcall fn) (setq ok t))
+          (if ok (sqlite-execute db "RELEASE pai_index_one")
+            (sqlite-execute db "ROLLBACK TO pai_index_one")
+            (sqlite-execute db "RELEASE pai_index_one")))
+      (error (message "pai-memory: skipped indexing %s: %s"
+                      (file-name-nondirectory what) (error-message-string err))
+             nil))))
+
+(defvar pai-memory--index-resume nil
+  "Session file the next indexing slice starts at, or nil for a fresh pass.
+A slice that runs out of time leaves this, so the next one goes on from there
+instead of walking the same files again.")
+
+(defvar pai-memory-index-progress nil
+  "(DONE . TOTAL) bytes of the session files indexed, after the last slice.")
+
+(defun pai-memory--index-measure (db files)
+  "Return (DONE . TOTAL) bytes of session FILES that DB has read."
+  (let ((offsets (make-hash-table :test #'equal)) (done 0) (total 0))
+    (dolist (row (sqlite-select db "SELECT path,offset FROM files"))
+      (puthash (car row) (cadr row) offsets))
+    (dolist (f files)
+      (let ((size (file-attribute-size (file-attributes f))))
+        (when (numberp size)
+          (setq total (+ total size)
+                done (+ done (min size (let ((o (gethash f offsets))) (if (numberp o) o 0))))))))
+    (cons done total)))
+
+(defun pai-memory-index-percent ()
+  "Return how much of the session files is indexed, 0-100, or nil when unknown."
+  (let ((p pai-memory-index-progress))
+    (and (consp p) (numberp (cdr p))
+         (if (> (cdr p) 0) (min 100 (floor (* 100.0 (car p)) (cdr p))) 100))))
+
 (defun pai-memory-index-update (&optional budget)
   "Bring the index up to date, spending at most BUDGET seconds (default no limit).
 Return `done' when everything is indexed, `more' when time ran out, or
-`full' when the index reached `:max-mb'."
+`full' when the index reached `:max-mb'.  A slice that runs out of time
+records where it stopped; the next one starts there."
   (let* ((db (pai-memory--db))
          (deadline (and budget (+ (float-time) budget)))
          (cap (pai-memory-get :search :tool-result-chars))
          (max-mb (pai-memory-get :search :max-mb))
+         (files (pai-memory--session-files))
+         (tail (and pai-memory--index-resume (member pai-memory--index-resume files)))
+         ;; resuming: the files from the resume point, then the ones before it
+         (todo (if tail (append tail (seq-take files (- (length files) (length tail)))) files))
          (result 'done))
+    (setq pai-memory--index-resume nil)
     (catch 'stop
       (sqlite-transaction db)
       (unwind-protect
           (progn
-            (pai-memory--drop-missing db)
-            (dolist (spec (pai-memory--markdown-files))
-              (pai-memory--index-markdown db spec)
-              (when (and deadline (> (float-time) deadline)) (setq result 'more) (throw 'stop nil)))
-            (dolist (file (pai-memory--session-files))
-              (when (and max-mb (> (pai-memory-index-size-mb) max-mb))
-                (setq result 'full) (throw 'stop nil))
-              (pai-memory--index-session-file db file cap)
-              (when (and deadline (> (float-time) deadline)) (setq result 'more) (throw 'stop nil))))
+            (unless tail                ; a fresh pass
+              (pai-memory--drop-missing db)
+              (dolist (spec (pai-memory--markdown-files))
+                ;; stop for time only after real work: this phase restarts
+                ;; from the top, and unchanged files must not starve the rest
+                (when (and (pai-memory--index-atomically
+                            db (car spec) (lambda () (pai-memory--index-markdown db spec)))
+                           deadline (> (float-time) deadline))
+                  (setq result 'more) (throw 'stop nil))))
+            (while todo
+              (let ((file (pop todo)) (r 'partial))
+                (when (and max-mb (> (pai-memory-index-size-mb) max-mb))
+                  (setq result 'full) (throw 'stop nil))
+                ;; a big file is read a chunk at a time, checking the clock
+                ;; between chunks
+                (while (eq r 'partial)
+                  (setq r (pai-memory--index-atomically
+                           db file (lambda () (pai-memory--index-session-file db file cap))))
+                  ;; as above: a file with nothing new never ends a slice, or
+                  ;; slices could go round the files forever saying `more'
+                  (when (and r deadline (> (float-time) deadline)
+                             (or (eq r 'partial) todo))
+                    (setq result 'more
+                          pai-memory--index-resume (if (eq r 'partial) file (car todo)))
+                    (throw 'stop nil))))))
+        ;; every file's rows and offset went in together (see
+        ;; `pai-memory--index-atomically'), so what is here is consistent
         (sqlite-commit db)))
+    (setq pai-memory-index-progress (ignore-errors (pai-memory--index-measure db files)))
     result))
 
 (defvar pai-memory--index-timer nil "Pending idle indexing timer.")
 (defvar pai-memory-index-status nil "Result of the last indexing pass.")
+(defvar pai-memory--index-reported nil "Float time of the last progress message, or nil.")
+
+(defun pai-memory--index-report (status)
+  "Show indexing progress in the echo area for a background slice with STATUS.
+Progress shows at most once a second and stays out of *Messages*; when a run
+that showed progress ends, a line saying so is logged."
+  (unless (active-minibuffer-window)
+    (let ((pct (pai-memory-index-percent)) (now (float-time)))
+      (pcase status
+        ('more
+         (when (or (null pai-memory--index-reported) (> (- now pai-memory--index-reported) 1.0))
+           (let ((message-log-max nil))
+             (message "pai-memory: indexing sessions for search… %s%%" (or pct "?")))
+           (setq pai-memory--index-reported now)))
+        (_
+         (when pai-memory--index-reported
+           (setq pai-memory--index-reported nil)
+           (message "pai-memory: search index %s (%.1f MB)"
+                    (if (eq status 'full) "is FULL" "up to date") (pai-memory-index-size-mb))))))))
 
 (defun pai-memory-index-schedule ()
   "Index in short idle slices until the index is complete."
@@ -371,10 +483,12 @@ Return `done' when everything is indexed, `more' when time ran out, or
              (condition-case err
                  (progn
                    (setq pai-memory-index-status (pai-memory-index-update 0.2))
+                   (pai-memory--index-report pai-memory-index-status)
                    (if (eq pai-memory-index-status 'more)
                        (pai-memory-index-schedule)
                      (when (fboundp 'pai-memory-embed-schedule) (pai-memory-embed-schedule))))
-               (error (message "pai-memory: indexing failed: %s" (error-message-string err)))))))))
+               (error (setq pai-memory--index-reported nil)
+                      (message "pai-memory: indexing failed: %s" (error-message-string err)))))))))
 
 ;;;; Search
 

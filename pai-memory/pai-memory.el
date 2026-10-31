@@ -341,7 +341,9 @@ NEW-TOKENS is how far the session digest grew since the last promotion."
             (when (pai-memory-search-available-p)
               (list (format "Search index: %.1f MB%s" (pai-memory-index-size-mb)
                             (pcase pai-memory-index-status
-                              ('more " · indexing") ('full " · FULL (raise the size limit or /memory reindex)")
+                              ('more (let ((pct (pai-memory-index-percent)))
+                                       (if pct (format " · indexing %d%%" pct) " · indexing")))
+                              ('full " · FULL (raise the size limit or /memory reindex)")
                               (_ "")))))
             (when session (pai-memory--spend-lines session))))
      "\n")))
