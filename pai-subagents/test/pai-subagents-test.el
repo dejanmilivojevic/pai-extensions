@@ -113,6 +113,35 @@
               (should (equal (plist-get (car pai-subagents--runs) :status) "completed")))))
       (pai-subagents-test--teardown buf))))
 
+(ert-deftest pai-subagents-rate-limited-child-waits-and-finishes ()
+  "A headless child hit by a rate limit waits it out instead of failing."
+  (let ((buf (pai-subagents-test--setup))
+        (pai-rate-limit-backoff-initial 0.2))
+    (unwind-protect
+        (progn
+          (pai-faux-push '(:error "HTTP 429: rate_limit_error")
+                         '(:text "fg-after-wait" :stop-reason stop))
+          (let* ((delivered nil) result entry)
+            (with-current-buffer buf
+              (funcall (plist-get (pai-tool-get "subagent") :execute)
+                       ;; the wait does not count against the timeout
+                       (list :agent "oracle" :task "x" :async :false :timeout 0.15)
+                       (list :cwd default-directory :model pai--model) nil
+                       (lambda (r) (setq result r delivered t)))
+              (setq entry (car pai-subagents--runs)))
+            (should-not delivered)
+            (should (equal (plist-get entry :status) "running"))
+            (should (plist-get entry :retry-at))
+            (should (string-match-p "rate limited, retry" (pai-subagents--run-line entry)))
+            (let ((end (+ (float-time) 1)))
+              (while (and (not delivered) (< (float-time) end))
+                (accept-process-output nil 0.02)))
+            (should delivered)
+            (should (equal (pai-content-text (plist-get result :content)) "fg-after-wait"))
+            (should (equal (plist-get entry :status) "completed"))
+            (should-not (plist-get entry :retry-at))))
+      (pai-subagents-test--teardown buf))))
+
 (ert-deftest pai-subagents-children-never-get-memory-tools ()
   "Tools marked `:subagent-exclude' (the user's memory) are kept from children."
   (let ((buf (pai-subagents-test--setup)))

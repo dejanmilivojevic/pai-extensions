@@ -121,6 +121,7 @@ With PREFIX nil or empty, return the newest live run."
   "Return a short glyph for ENTRY's status."
   (pcase (plist-get entry :status)
     ("running" "⛭")
+    ("waiting" "⏳")
     ("idle" "•")
     ("stopped" "◼")
     ("failed" "✗")
@@ -137,7 +138,11 @@ With PREFIX nil or empty, return the newest live run."
             (plist-get entry :status)
             (pai-isub--fmt-count (plist-get metrics :tokens))
             (if metrics (format "t · %4d tok/s" (or (plist-get metrics :tps) 0)) "")
-            (pai-isub--fmt-duration (pai-isub--elapsed entry)))))
+            (concat (pai-isub--fmt-duration (pai-isub--elapsed entry))
+                    (if-let ((at (and (equal (plist-get entry :status) "waiting")
+                                      (plist-get entry :retry-at))))
+                        (format-time-string " · rate limited, retry %H:%M" at)
+                      "")))))
 
 (defun pai-isub--shown-runs ()
   "Return the entries worth showing above the prompt, oldest first."
@@ -385,7 +390,22 @@ This is the single funnel every backend reports through."
        (plist-put entry :status "idle"))
       ('busy
        (pai-isub--cancel-idle entry)
+       ;; back from a rate-limit wait: the turn timeout runs again
+       (when (equal (plist-get entry :status) "waiting")
+         (plist-put entry :retry-at nil)
+         (when (plist-get entry :awaiting)
+           (pai-isub--clear-timer entry)
+           (pai-isub--arm-timeout entry (plist-get entry :timeout))))
        (plist-put entry :status "running"))
+      ('waiting
+       ;; The child's turn waits out a provider rate limit and retries by
+       ;; itself: it is neither finished nor idle, and the wait does not
+       ;; count against the turn timeout.
+       (pai-isub--clear-timer entry)
+       (pai-isub--cancel-idle entry)
+       (plist-put entry :status "waiting")
+       (plist-put entry :retry-at (plist-get props :until))
+       (when text (plist-put entry :last-output text)))
       ('status
        (plist-put entry :last-output text))
       ('reply
@@ -440,6 +460,7 @@ This is the single funnel every backend reports through."
 
 (defun pai-isub--arm-timeout (entry timeout)
   "Arm a TIMEOUT (seconds) for the turn ENTRY is currently awaiting."
+  (plist-put entry :timeout timeout)
   (when (and (numberp timeout) (> timeout 0))
     (plist-put
      entry :timer

@@ -835,5 +835,78 @@
             (should (pai-isub-live-p entry))))
       (pai-isub-test--teardown buf))))
 
+;;;; Rate limits
+
+(ert-deftest pai-isub-rate-limit-wait-keeps-the-child-open ()
+  "A child waiting out a rate limit is neither idle-closed nor timed out."
+  (let ((buf (pai-isub-test--setup '(:idle-close-seconds 0.1))))
+    (unwind-protect
+        (pai-isub-test--with-quiet-parent
+          (pai-isub-test--execute (list :agent "scout" :task "t" :timeout 0.15) buf)
+          (let ((entry (with-current-buffer buf (car pai-isub--runs)))
+                (until (+ (float-time) 3600)))
+            (funcall pai-isub-test--emit 'busy)
+            (funcall pai-isub-test--emit 'waiting :until until :text "rate limited")
+            (should (equal (plist-get entry :status) "waiting"))
+            (should (= (plist-get entry :retry-at) until))
+            (should (string-match-p "rate limited, retry"
+                                    (pai-isub--run-line entry)))
+            ;; longer than both the idle delay and the turn timeout
+            (pai-isub-test--wait 0.35)
+            (should (pai-isub-live-p entry))
+            (should-not (assq 'interrupt pai-isub-test--events))
+            (should (plist-get entry :awaiting))
+            ;; retrying: running again, and the turn timeout is back
+            (funcall pai-isub-test--emit 'busy)
+            (should (equal (plist-get entry :status) "running"))
+            (should-not (plist-get entry :retry-at))
+            (pai-isub-test--wait 0.3)
+            (should (assq 'interrupt pai-isub-test--events))))
+      (pai-isub-test--teardown buf))))
+
+(ert-deftest pai-isub-end-to-end-rate-limited-child-resumes ()
+  "A real pai child hit by a rate limit waits, retries, and reports home."
+  (let* ((home (make-temp-file "pai-isub-home" t))
+         (project (file-name-as-directory (make-temp-file "pai-isub-proj" t)))
+         (pai-directory home)
+         (default-directory project)
+         (pai-default-model "faux/faux")
+         (pai-rate-limit-backoff-initial 0.3)
+         (parent (generate-new-buffer "*pai: isub-rl-parent*"))
+         child)
+    (unwind-protect
+        (progn
+          (pai-faux-reset)
+          (with-current-buffer parent
+            (pai--setup project)
+            (setq pai--model (pai-model "faux/faux"))
+            (pai-faux-push '(:error "HTTP 429: {\"type\":\"rate_limit_error\"}")
+                           '(:text "child made it after the wait" :stop-reason stop))
+            (funcall (plist-get pai-isub-tool :execute)
+                     (list :agent "scout" :task "look at foo.el")
+                     (list :cwd default-directory :model pai--model) nil #'ignore)
+            (pai-isub-test--pump 5)
+            (let ((entry (car pai-isub--runs)))
+              (setq child (pai-isub-entry-buffer entry))
+              (should (equal (plist-get entry :status) "waiting"))
+              (with-current-buffer child
+                (should pai--active)
+                (should (string-match-p "Rate limited by faux" (buffer-string))))
+              (pai-isub-test--wait 0.6)
+              (should (equal (plist-get entry :status) "idle"))
+              (with-current-buffer child
+                (should-not pai--active)
+                (should (string-match-p "retrying the turn" (buffer-string))))
+              (should (equal (plist-get entry :last-output) "child made it after the wait"))
+              (should (string-match-p "child made it after the wait" (buffer-string))))))
+      (when (buffer-live-p parent)
+        (with-current-buffer parent
+          (when (timerp pai-isub--ui-timer) (cancel-timer pai-isub--ui-timer)))
+        (kill-buffer parent))
+      (when (buffer-live-p child) (kill-buffer child))
+      (pai-faux-reset)
+      (delete-directory home t)
+      (delete-directory project t))))
+
 (provide 'pai-interactive-subagents-test)
 ;;; pai-interactive-subagents-test.el ends here
