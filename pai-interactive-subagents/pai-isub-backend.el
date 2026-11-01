@@ -43,6 +43,10 @@
 ;;   (emit 'turn-end :text STR)       a turn finished with final text STR
 ;;   (emit 'reply :text STR)          explicit message aimed at the parent
 ;;   (emit 'status :text STR)         free-form status for the parent's UI
+;;   (emit 'waiting :until TIME :text STR)
+;;                                    the turn is waiting out a provider rate
+;;                                    limit until TIME (epoch seconds); a
+;;                                    later 'busy means it is retrying
 ;;   (emit 'exit :reason SYM)         the session is gone
 ;;
 ;; Everything else (roles, model resolution, delivery into the parent turn,

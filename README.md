@@ -95,6 +95,13 @@ them open). Any command in its buffer, its window being selected, or text
 typed at its prompt and not sent yet keeps it open; the parent's transcript
 notes the close.
 
+**Rate limits.** A subagent whose provider rate-limits it is not finished:
+its turn waits until the limit resets and then runs again (core pai's
+rate-limit retry). Meanwhile it shows as `waiting` (⏳, with the retry time)
+in the status block, it is never idle-closed, and the wait does not count
+against a `timeout`; the parent still gets the turn's real result once it
+completes.
+
 | `subagent` action | Effect |
 |-------------------|--------|
 | `launch` (default) | Open a session for a role and give it a task |

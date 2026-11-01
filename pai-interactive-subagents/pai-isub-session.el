@@ -112,6 +112,22 @@ Registered as a `context' handler; a no-op outside subagent sessions."
 
 ;;;; Turn observation (metrics + reporting back)
 
+(defun pai-isub-session-rate-limit-wait-hook (event _ctx)
+  "Tell the parent this child's turn waits out a rate limit (EVENT).
+The run is paused, not over: it retries by itself once the limit lifts."
+  (when pai-isub--id
+    (let ((until (plist-get event :until)))
+      (pai-isub-child-emit
+       'waiting :until until
+       :text (format "rate limited; retrying at %s"
+                     (if (fboundp 'pai-rate-limit-format-time)
+                         (pai-rate-limit-format-time until)
+                       (format-time-string "%H:%M:%S" until)))))))
+
+(defun pai-isub-session-rate-limit-retry-hook (_event _ctx)
+  "Tell the parent this child's rate-limited turn is running again."
+  (when pai-isub--id (pai-isub-child-emit 'busy)))
+
 (defun pai-isub-session-agent-start-hook (_event _ctx)
   "Tell the parent a turn started.  A no-op outside subagent sessions."
   (when pai-isub--id
@@ -159,7 +175,9 @@ Registered as a `context' handler; a no-op outside subagent sessions."
     (agent-start . pai-isub-session-agent-start-hook)
     (message-update . pai-isub-session-message-update-hook)
     (message-end . pai-isub-session-message-end-hook)
-    (agent-end . pai-isub-session-agent-end-hook))
+    (agent-end . pai-isub-session-agent-end-hook)
+    (rate-limit-wait . pai-isub-session-rate-limit-wait-hook)
+    (rate-limit-retry . pai-isub-session-rate-limit-retry-hook))
   "Event -> handler pairs a child session needs to report home.")
 
 (defun pai-isub-session-install-hooks ()

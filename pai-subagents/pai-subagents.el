@@ -34,6 +34,7 @@
 (require 'pai)
 (require 'pai-ext)
 (require 'pai-agent)
+(require 'pai-rate-limit)
 (require 'pai-models)
 (require 'pai-settings)
 (require 'pai-skills)
@@ -283,7 +284,46 @@ streamed characters (~4 chars/token) so the display stays live."
          (plist-put entry :usage-tokens
                     (+ (or (plist-get entry :usage-tokens) 0)
                        (or (plist-get (plist-get m :usage) :output) 0)))
-         (plist-put entry :stream-chars 0))))))
+         (plist-put entry :stream-chars 0))))
+    ('turn-end
+     ;; a turn that went through: the rate-limit backoff starts over
+     (unless (memq (plist-get (plist-get event :message) :stop-reason) '(error aborted))
+       (pai-rate-limit-reset (plist-get entry :rate-limit))))))
+
+(defun pai-subagents--arm-timeout (entry timeout)
+  "Abort ENTRY's run after TIMEOUT seconds (none when TIMEOUT is not positive)."
+  (plist-put entry :timeout timeout)
+  (let ((timer (plist-get entry :timeout-timer)))
+    (when timer (cancel-timer timer)))
+  (plist-put entry :timeout-timer nil)
+  (when (and (numberp timeout) (> timeout 0))
+    (plist-put
+     entry :timeout-timer
+     (run-at-time timeout nil
+                  (lambda ()
+                    (when (equal (plist-get entry :status) "running")
+                      (ignore-errors (pai-agent-abort (plist-get entry :run)))
+                      (pai-subagents--finish
+                       entry
+                       (list :text "run exceeded timeout" :is-error t))))))))
+
+(defun pai-subagents--recover-error (entry)
+  "Return ENTRY's `:recover-error' hook: wait out rate limits, then retry.
+While the child waits it stays running, its timeout paused (the wait does
+not count against it), and its status line shows when it retries."
+  (pai-rate-limit-recover-function
+   (plist-get entry :rate-limit)
+   (lambda (info)
+     (let ((timer (plist-get entry :timeout-timer)))
+       (when timer (cancel-timer timer)))
+     (plist-put entry :timeout-timer nil)
+     (plist-put entry :retry-at (plist-get info :until))
+     (pai-subagents--ui-refresh (plist-get entry :parent)))
+   (lambda ()
+     (plist-put entry :retry-at nil)
+     (when (equal (plist-get entry :status) "running")
+       (pai-subagents--arm-timeout entry (plist-get entry :timeout)))
+     (pai-subagents--ui-refresh (plist-get entry :parent)))))
 
 (defun pai-subagents--running ()
   "Return running run entries for this instance, oldest first."
@@ -292,11 +332,14 @@ streamed characters (~4 chars/token) so the display stays live."
 
 (defun pai-subagents--run-line (entry)
   "Return a single status line for run ENTRY."
-  (format "⛭ %-6s %-9s %6st · %4d tok/s · %s"
+  (format "⛭ %-6s %-9s %6st · %4d tok/s · %s%s"
           (plist-get entry :id) (plist-get entry :role)
           (pai-subagents--fmt-count (pai-subagents--tokens entry))
           (pai-subagents--tps entry)
-          (pai-subagents--fmt-duration (pai-subagents--elapsed entry))))
+          (pai-subagents--fmt-duration (pai-subagents--elapsed entry))
+          (if-let ((at (plist-get entry :retry-at)))
+              (format-time-string " · rate limited, retry %H:%M" at)
+            "")))
 
 (defun pai-subagents--block-string (running)
   "Return the multi-line overlay text for RUNNING runs (one per line)."
@@ -414,6 +457,8 @@ Idempotent: a second call for a finished entry is ignored."
     (let* ((timer (plist-get entry :timeout-timer)))
       (when timer (cancel-timer timer))
       (plist-put entry :timeout-timer nil))
+    (pai-rate-limit-cancel (plist-get entry :rate-limit))
+    (plist-put entry :retry-at nil)
     (let* ((errp (eq (plist-get result :is-error) t))
            (trunc (pai-tools-truncate (or (plist-get result :text) "")
                                       (plist-get entry :max-lines) nil 'head))
@@ -484,16 +529,21 @@ foreground tool call (nil for background runs)."
                         :model (pai-model-key (car resolved))
                         :parent parent :on-done on-done
                         :started (float-time) :ended nil
-                        :usage-tokens 0 :stream-chars 0))
+                        :usage-tokens 0 :stream-chars 0
+                        :rate-limit (pai-rate-limit-state-create)))
            (timeout (plist-get args :timeout)))
       (when (cadr resolved)
         (plist-put entry :thinking (cadr resolved)))
+      ;; armed first: a run can fail (and start a rate-limit wait, which
+      ;; pauses the timeout) before `pai-agent-run' even returns
+      (pai-subagents--arm-timeout entry timeout)
       (setf (plist-get entry :run)
             (pai-agent-run
              (list) (pai-context messages tools)
              (append (list :model (car resolved)
                            :tool-execution 'sequential
-                           :cwd default-directory)
+                           :cwd default-directory
+                           :recover-error (pai-subagents--recover-error entry))
                      (when (cadr resolved) (list :reasoning (cadr resolved))))
              (lambda (ev) (pai-subagents--observe entry ev))
              (lambda (msgs)
@@ -501,16 +551,6 @@ foreground tool call (nil for background runs)."
                 entry
                 (list :text (pai-subagents--result-text msgs)
                       :is-error :false)))))
-      (when (and (numberp timeout) (> timeout 0))
-        (plist-put
-         entry :timeout-timer
-         (run-at-time timeout nil
-                      (lambda ()
-                        (when (equal (plist-get entry :status) "running")
-                          (ignore-errors (pai-agent-abort (plist-get entry :run)))
-                          (pai-subagents--finish
-                           entry
-                           (list :text "run exceeded timeout" :is-error t)))))))
       (pai-subagents--record entry)
       (pai-subagents--ui-refresh parent)
       entry)))
@@ -521,6 +561,8 @@ foreground tool call (nil for background runs)."
     (ignore-errors (pai-agent-abort (plist-get entry :run)))
     (let ((timer (plist-get entry :timeout-timer)))
       (when timer (cancel-timer timer)))
+    (pai-rate-limit-cancel (plist-get entry :rate-limit))
+    (plist-put entry :retry-at nil)
     (plist-put entry :ended (float-time))
     (plist-put entry :status "stopped")
     (plist-put entry :output "stopped by user")
